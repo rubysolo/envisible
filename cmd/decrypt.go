@@ -9,7 +9,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var stripMarkers bool
+var (
+	stripMarkers bool
+	textconv     bool
+)
 
 var decryptCmd = &cobra.Command{
 	Use:   "decrypt [file]",
@@ -17,24 +20,36 @@ var decryptCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		filePath := args[0]
-		
-		privKeyData, err := os.ReadFile(privKeyPath)
-		if err != nil {
-			return fmt.Errorf("failed to read private key: %w", err)
-		}
-		
-		privKey, err := crypto.DecodeKey(string(privKeyData))
-		if err != nil {
-			return fmt.Errorf("failed to decode private key: %w", err)
-		}
 
 		content, err := os.ReadFile(filePath)
 		if err != nil {
 			return fmt.Errorf("failed to read file: %w", err)
 		}
 
+		privKeyData, err := os.ReadFile(privKeyPath)
+		if err != nil {
+			if textconv {
+				fmt.Fprint(cmd.OutOrStdout(), string(content))
+				return nil
+			}
+			return fmt.Errorf("failed to read private key: %w", err)
+		}
+
+		privKey, err := crypto.DecodeKey(string(privKeyData))
+		if err != nil {
+			if textconv {
+				fmt.Fprint(cmd.OutOrStdout(), string(content))
+				return nil
+			}
+			return fmt.Errorf("failed to decode private key: %w", err)
+		}
+
 		decrypted, err := processor.DecryptContent(content, privKey, !stripMarkers)
 		if err != nil {
+			if textconv {
+				fmt.Fprint(cmd.OutOrStdout(), string(content))
+				return nil
+			}
 			return fmt.Errorf("failed to decrypt content: %w", err)
 		}
 
@@ -44,7 +59,7 @@ var decryptCmd = &cobra.Command{
 				return fmt.Errorf("failed to write file: %w", err)
 			}
 		} else {
-			fmt.Print(string(decrypted))
+			fmt.Fprint(cmd.OutOrStdout(), string(decrypted))
 		}
 
 		return nil
@@ -54,5 +69,6 @@ var decryptCmd = &cobra.Command{
 func init() {
 	decryptCmd.Flags().BoolVarP(&inplace, "inplace", "i", false, "modify the file in place")
 	decryptCmd.Flags().BoolVar(&stripMarkers, "strip", false, "strip ENC[...] markers and show only plaintext")
+	decryptCmd.Flags().BoolVar(&textconv, "textconv", false, "safely output original content on error (for git diff)")
 	rootCmd.AddCommand(decryptCmd)
 }

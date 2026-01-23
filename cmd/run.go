@@ -53,8 +53,8 @@ var runCmd = &cobra.Command{
 			childCmd.Env = append(childCmd.Env, fmt.Sprintf("%s=%s", k, v))
 		}
 		childCmd.Stdin = os.Stdin
-		childCmd.Stdout = os.Stdout
-		childCmd.Stderr = os.Stderr
+		childCmd.Stdout = cmd.OutOrStdout()
+		childCmd.Stderr = cmd.ErrOrStderr()
 
 		// Handle signals
 		sigs := make(chan os.Signal, 1)

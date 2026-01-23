@@ -69,6 +69,32 @@ Ensure no unencrypted secrets are committed:
 envisible check config.yaml
 ```
 
+## Git Integration
+
+Envisible includes helpers to integrate with your local git workflow.
+
+### Diffing Secrets
+To view decrypted secrets in `git diff` (when you have the key):
+
+```bash
+# 1. Configure git (adds diff driver)
+envisible git setup
+
+# 2. Add attributes (as instructed by the command above)
+# Add this to your .gitattributes file:
+# *.yaml diff=envisible
+```
+
+Now `git diff` will show the decrypted changes for matching files.
+
+### Pre-commit Hook
+To automatically prevent committing unencrypted secrets:
+
+```bash
+envisible git install-hook
+```
+This installs a `.git/hooks/pre-commit` script that runs `envisible check` on staged files.
+
 ## How it Works
 
 - **Markers**: Look for `ENC[content]`.

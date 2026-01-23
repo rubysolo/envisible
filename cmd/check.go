@@ -33,7 +33,7 @@ var checkCmd = &cobra.Command{
 			// match[0] is ENC[...], match[1] is the inner content
 			inner := string(match[1])
 			if !strings.HasPrefix(inner, "v1:") {
-				fmt.Printf("Unencrypted value found: %s\n", match[0])
+				fmt.Fprintf(cmd.OutOrStdout(), "Unencrypted value found: %s\n", match[0])
 				unencryptedCount++
 			}
 		}
@@ -42,7 +42,7 @@ var checkCmd = &cobra.Command{
 			return fmt.Errorf("found %d unencrypted values in %s", unencryptedCount, filePath)
 		}
 
-		fmt.Printf("All ENC[...] markers in %s appear to be encrypted.\n", filePath)
+		fmt.Fprintf(cmd.OutOrStdout(), "All ENC[...] markers in %s appear to be encrypted.\n", filePath)
 		return nil
 	},
 }

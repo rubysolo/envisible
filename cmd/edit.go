@@ -14,12 +14,11 @@ var editCmd = &cobra.Command{
 	Use:   "edit [file]",
 	Short: "Edit an encrypted file in your default editor",
 	Args:  cobra.ExactArgs(1),
-	RunE: func(cobraCmd *cobra.Command, args []string) error {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		filePath := args[0]
 
 		// 1. Load keys
-
-privKeyData, err := os.ReadFile(privKeyPath)
+		privKeyData, err := os.ReadFile(privKeyPath)
 		if err != nil {
 			return fmt.Errorf("failed to read private key: %w", err)
 		}
@@ -28,13 +27,11 @@ privKeyData, err := os.ReadFile(privKeyPath)
 			return fmt.Errorf("failed to decode private key: %w", err)
 		}
 
-
-pubKeyData, err := os.ReadFile(pubKeyPath)
+		pubKeyData, err := os.ReadFile(pubKeyPath)
 		if err != nil {
 			return fmt.Errorf("failed to read public key: %w", err)
 		}
-
-pubKey, err := crypto.DecodeKey(string(pubKeyData))
+		pubKey, err := crypto.DecodeKey(string(pubKeyData))
 		if err != nil {
 			return fmt.Errorf("failed to decode public key: %w", err)
 		}
@@ -74,8 +71,8 @@ pubKey, err := crypto.DecodeKey(string(pubKeyData))
 
 		editorCmd := exec.Command(editor, tmpPath)
 		editorCmd.Stdin = os.Stdin
-		editorCmd.Stdout = os.Stdout
-		editorCmd.Stderr = os.Stderr
+		editorCmd.Stdout = cmd.OutOrStdout()
+		editorCmd.Stderr = cmd.ErrOrStderr()
 		if err := editorCmd.Run(); err != nil {
 			return fmt.Errorf("editor failed: %w", err)
 		}
@@ -97,7 +94,7 @@ pubKey, err := crypto.DecodeKey(string(pubKeyData))
 			return fmt.Errorf("failed to write file: %w", err)
 		}
 
-		fmt.Printf("File %s updated and encrypted.\n", filePath)
+		fmt.Fprintf(cmd.OutOrStdout(), "File %s updated and encrypted.\n", filePath)
 		return nil
 	},
 }

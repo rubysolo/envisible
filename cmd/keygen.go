@@ -27,7 +27,7 @@ var keygenCmd = &cobra.Command{
 			return fmt.Errorf("failed to write private key: %w", err)
 		}
 
-		fmt.Printf("Generated keys:\n  Public:  %s\n  Private: %s\n", pubKeyPath, privKeyPath)
+		fmt.Fprintf(cmd.OutOrStdout(), "Generated keys:\n  Public:  %s\n  Private: %s\n", pubKeyPath, privKeyPath)
 		return nil
 	},
 }

@@ -30,8 +30,8 @@
     - [x] Re-encrypt and save on exit.
 
 ## Phase 3: Future & Polish [Pending]
-- [ ] **Git Integration**: Investigate `git diff` drivers to show plaintext diffs locally (if keys are present).
+- [x] **Git Integration**: Investigate `git diff` drivers to show plaintext diffs locally (if keys are present).
 - [ ] **Cloud Key Providers**: Abstract `pkg/crypto` to support AWS KMS / GCP KMS / Vault (Deferred).
 - [ ] **IDE Integration**: VS Code plugin for auto-encrypt on save (Deferred).
-- [ ] **Pre-commit Hooks**: Helper script to ensure no plaintext `ENC[...]` markers are committed.
+- [x] **Pre-commit Hooks**: Helper script to ensure no plaintext `ENC[...]` markers are committed.
 - [ ] **Release**: Setup GitHub Actions for cross-platform binary builds.
