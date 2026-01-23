@@ -1,0 +1,68 @@
+version: 2
+project_name: envisible
+before:
+  hooks:
+    - go mod tidy
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/rubysolo/envisible/cmd.Version={{.Version}} -X github.com/rubysolo/envisible/cmd.Commit={{.Commit}} -X github.com/rubysolo/envisible/cmd.Date={{.Date}}
+
+archives:
+  - name_template: >-
+      {{ .ProjectName }}_
+      {{- if eq .Os "darwin" }}Darwin
+      {{- else if eq .Os "linux" }}Linux
+      {{- else if eq .Os "windows" }}Windows
+      {{- else }}{{ .Os }}{{ end }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+brews:
+  - name: envisible
+    repository:
+      owner: rubysolo
+      name: homebrew-tools
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+
+    # Git author used to commit to the repository.
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+
+    # The project's homepage.
+    homepage: "https://github.com/rubysolo/envisible"
+
+    # The project's description.
+    description: "Simple encrypted configuration management tool."
+
+    # Custom install script.
+    install: |
+      bin.install "envisible"
+
+    # Test command for the formula.
+    test: |
+      system "#{bin}/envisible version"
