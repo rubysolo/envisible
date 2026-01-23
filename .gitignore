@@ -1,0 +1,67 @@
+# .gitignore for a Go project
+# Ignore common build artifacts, OS/editor files, and secrets
+
+# Binaries and build output
+/bin/
+/build/
+/out/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+envisible
+
+# Test outputs
+*.test
+*.out
+coverage.out
+*.coverprofile
+
+# Vendor dependencies (uncomment if you vendor dependencies)
+# vendor/
+
+# Generated object files
+*.o
+*.a
+*.lo
+
+# Logs and temporary files
+*.log
+*.tmp
+*_tmp
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.iml
+*.sublime-workspace
+*.sublime-project
+*.swp
+*.swo
+*.class
+
+# macOS & Windows system files
+.DS_Store
+Thumbs.db
+
+# Environment / secret files
+*.env
+*.env.local
+*.env.*
+*.key
+*.pem
+*.p12
+*.crt
+*.cert
+secrets.*
+
+# Misc
+# Ignore compiled Go packages (cache is not usually in repo, but keep this for safety)
+*.test
+
+# Notes:
+# - Keep `go.sum` and source directories such as `pkg/` and `cmd/` tracked.
+# - If you already committed secrets (e.g. bad.env), remove them from Git tracking:
+#     git rm --cached bad.env && git commit -m "stop tracking bad.env"
