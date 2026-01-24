@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/rubysolo/envisible/pkg/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -21,19 +22,15 @@ var checkCmd = &cobra.Command{
 			return fmt.Errorf("failed to read file: %w", err)
 		}
 
-		// Re-use regex from processor, but locally here for simplicity or export it. 
-		// For now, I'll duplicate the simple regex or better, export it from processor.
-		// Since I didn't export it in the previous step (it was lower case), I'll define it here.
 		encRegex := regexp.MustCompile(`ENC\[(.*?)\]`)
 
 		matches := encRegex.FindAllSubmatch(content, -1)
 		unencryptedCount := 0
 
 		for _, match := range matches {
-			// match[0] is ENC[...], match[1] is the inner content
 			inner := string(match[1])
 			if !strings.HasPrefix(inner, "v1:") {
-				fmt.Fprintf(cmd.OutOrStdout(), "Unencrypted value found: %s\n", match[0])
+				ui.Warn("Unencrypted value found: %s", match[0])
 				unencryptedCount++
 			}
 		}
@@ -42,7 +39,7 @@ var checkCmd = &cobra.Command{
 			return fmt.Errorf("found %d unencrypted values in %s", unencryptedCount, filePath)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "All ENC[...] markers in %s appear to be encrypted.\n", filePath)
+		ui.Success("All ENC[...] markers in %s appear to be encrypted.", filePath)
 		return nil
 	},
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/rubysolo/envisible/pkg/crypto"
 	"github.com/rubysolo/envisible/pkg/processor"
+	"github.com/rubysolo/envisible/pkg/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -69,6 +70,7 @@ var editCmd = &cobra.Command{
 			editor = "vim"
 		}
 
+		ui.Info("Opening %s in %s...", filePath, editor)
 		editorCmd := exec.Command(editor, tmpPath)
 		editorCmd.Stdin = os.Stdin
 		editorCmd.Stdout = cmd.OutOrStdout()
@@ -94,7 +96,7 @@ var editCmd = &cobra.Command{
 			return fmt.Errorf("failed to write file: %w", err)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "File %s updated and encrypted.\n", filePath)
+		ui.Success("File %s updated and encrypted.", filePath)
 		return nil
 	},
 }

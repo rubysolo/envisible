@@ -1,10 +1,10 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/rubysolo/envisible/pkg/crypto"
+	"github.com/rubysolo/envisible/pkg/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -19,15 +19,17 @@ var keygenCmd = &cobra.Command{
 
 		err = os.WriteFile(pubKeyPath, []byte(crypto.EncodeKey(pub)), 0644)
 		if err != nil {
-			return fmt.Errorf("failed to write public key: %w", err)
+			return err
 		}
 
 		err = os.WriteFile(privKeyPath, []byte(crypto.EncodeKey(priv)), 0600)
 		if err != nil {
-			return fmt.Errorf("failed to write private key: %w", err)
+			return err
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "Generated keys:\n  Public:  %s\n  Private: %s\n", pubKeyPath, privKeyPath)
+		ui.Success("Generated keys")
+		ui.KV("Public", pubKeyPath)
+		ui.KV("Private", privKeyPath)
 		return nil
 	},
 }

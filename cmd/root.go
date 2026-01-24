@@ -12,10 +12,11 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "envisible",
-	Short: "Envisible is a tool for managing encrypted secrets in environment files",
-	Long: `A CLI tool to manage encryption / decryption of sensitive data in env files 
-(e.g. yaml, toml, json, .env) using explicit ENC[...] markers.`,
+	Use:           "envisible",
+	Short:         "Envisible is a tool for managing encrypted secrets in environment files",
+	Long:          `A CLI tool to manage encryption / decryption of sensitive data in env files (e.g. yaml, toml, json, .env) using explicit ENC[...] markers.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 func Execute() error {

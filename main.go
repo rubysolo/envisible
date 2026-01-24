@@ -1,15 +1,15 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/rubysolo/envisible/cmd"
+	"github.com/rubysolo/envisible/pkg/ui"
 )
 
 func main() {
 	if err := cmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		ui.Error("%v", err)
 		os.Exit(1)
 	}
 }

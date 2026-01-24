@@ -5,10 +5,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/rubysolo/envisible/pkg/crypto"
 	"github.com/rubysolo/envisible/pkg/processor"
+	"github.com/rubysolo/envisible/pkg/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -39,6 +41,8 @@ var runCmd = &cobra.Command{
 			}
 			// If .env is missing, just continue with current env
 			content = []byte{}
+		} else {
+			ui.Info("Loading environment from %s", envFile)
 		}
 
 		extraEnv, err := processor.ExtractEnv(content, privKey)
@@ -66,6 +70,7 @@ var runCmd = &cobra.Command{
 			}
 		}()
 
+		ui.Success("Starting: %s", strings.Join(args, " "))
 		err = childCmd.Run()
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {

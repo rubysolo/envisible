@@ -6,6 +6,7 @@ import (
 
 	"github.com/rubysolo/envisible/pkg/crypto"
 	"github.com/rubysolo/envisible/pkg/processor"
+	"github.com/rubysolo/envisible/pkg/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -43,6 +44,7 @@ var encryptCmd = &cobra.Command{
 			if err != nil {
 				return fmt.Errorf("failed to write file: %w", err)
 			}
+			ui.Success("File %s encrypted in-place.", filePath)
 		} else {
 			fmt.Fprint(cmd.OutOrStdout(), string(encrypted))
 		}
