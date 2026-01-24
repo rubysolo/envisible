@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/rubysolo/envisible/pkg/crypto"
 )
 
 func resetRoot(out io.Writer) {
@@ -301,6 +304,62 @@ func TestDecryptTextconv(t *testing.T) {
 
 	if b.String() != content {
 		t.Errorf("expected original content, got %q", b.String())
+	}
+}
+
+func TestPartialEncryptionWorkflow(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "envisible-partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	// 1. Keygen
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"keygen"})
+	rootCmd.Execute()
+
+	// 2. Create a partially encrypted file
+	// We'll use a fake v1: marker for VAR1, and plain for VAR2.
+	// Actually, better to use a real one so we can decrypt later.
+	
+	// Encrypt just VAR1 manually first
+	pubKeyData, _ := os.ReadFile("envisible.pub")
+	pubKey, _ := crypto.DecodeKey(string(pubKeyData))
+	
+	val1Enc, _ := crypto.Encrypt([]byte("val1"), pubKey)
+	marker1 := "ENC[v1:" + val1Enc + "]"
+	
+	os.WriteFile("mixed.env", []byte(fmt.Sprintf("VAR1=%s\nVAR2=ENC[val2]", marker1)), 0644)
+
+	// 3. Run encrypt command
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", "mixed.env"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt failed: %v", err)
+	}
+
+	// 4. Verify content
+	finalContent, _ := os.ReadFile("mixed.env")
+	if !bytes.Contains(finalContent, []byte(marker1)) {
+		t.Error("Pre-existing encrypted marker was modified or lost")
+	}
+	if !bytes.Contains(finalContent, []byte("VAR2=ENC[v1:")) {
+		t.Error("New marker was not encrypted")
+	}
+
+	// 5. Decrypt and check
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"decrypt", "mixed.env"})
+	rootCmd.Execute()
+
+	if !contains(b.String(), "VAR1=ENC[val1]") || !contains(b.String(), "VAR2=ENC[val2]") {
+		t.Errorf("decryption failed to recover both values correctly. Got: %q", b.String())
 	}
 }
 

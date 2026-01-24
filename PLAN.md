@@ -43,4 +43,4 @@
 - [ ] **IDE Integration**: VS Code plugin for auto-encrypt on save (Deferred).
 - [X] **Pre-commit Hooks**: Helper script to ensure no plaintext `ENC[...]` markers are committed.
 - [X] **Release**: Setup GitHub Actions for cross-platform binary builds.
-- [ ] **Verification**: Command to safely verify that a file is encrypted with the expected key.
+- [X] **Verification**: Command to safely verify that a file is encrypted with the expected key.

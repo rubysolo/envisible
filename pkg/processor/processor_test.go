@@ -2,6 +2,7 @@ package processor
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/rubysolo/envisible/pkg/crypto"
@@ -62,6 +63,50 @@ OTHER=plain
 	}
 }
 
+func TestPartialEncryption(t *testing.T) {
+	pub, priv, err := crypto.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("Failed to generate keys: %v", err)
+	}
+
+	// 1. Start with one already encrypted value and one plain value
+	secret1 := "already-encrypted"
+	secret2 := "newly-encrypted"
+
+	enc1, _ := crypto.Encrypt([]byte(secret1), pub)
+	marker1 := "ENC[v1:" + enc1 + "]"
+
+	content := []byte(fmt.Sprintf("VAR1=%s\nVAR2=ENC[%s]", marker1, secret2))
+
+	// 2. Run encryption
+	encrypted, err := EncryptContent(content, pub)
+	if err != nil {
+		t.Fatalf("Encryption failed: %v", err)
+	}
+
+	// 3. Verify VAR1 is unchanged and VAR2 is encrypted
+	if !bytes.Contains(encrypted, []byte(marker1)) {
+		t.Error("Pre-encrypted marker was modified")
+	}
+	if !bytes.Contains(encrypted, []byte("VAR2=ENC[v1:")) {
+		t.Error("New marker was not encrypted")
+	}
+	if bytes.Contains(encrypted, []byte(secret2)) {
+		t.Error("New secret still visible in plaintext")
+	}
+
+	// 4. Decrypt and verify both are correct
+	decrypted, err := DecryptContent(encrypted, priv, true)
+	if err != nil {
+		t.Fatalf("Decryption failed: %v", err)
+	}
+
+	expected := fmt.Sprintf("VAR1=ENC[%s]\nVAR2=ENC[%s]", secret1, secret2)
+	if string(decrypted) != expected {
+		t.Errorf("Decrypted content mismatch.\nExpected: %s\nGot: %s", expected, string(decrypted))
+	}
+}
+
 func TestExtractEnv(t *testing.T) {
 	pub, priv, _ := crypto.GenerateKeypair()
 	content := []byte("FOO=ENC[bar]\nBAZ=\"ENC[qux]\"\n# Comment\nPLAIN=simple")
@@ -86,7 +131,7 @@ func TestExtractEnv(t *testing.T) {
 func TestDecryptErrors(t *testing.T) {
 	_, priv, _ := crypto.GenerateKeypair()
 	content := []byte("BAD=ENC[v1:not-base64-at-all]")
-	
+
 	_, err := DecryptContent(content, priv, false)
 	if err == nil {
 		t.Error("expected error for invalid base64")
@@ -100,4 +145,3 @@ func TestDecryptErrors(t *testing.T) {
 		t.Error("expected error for decryption with wrong key")
 	}
 }
-
