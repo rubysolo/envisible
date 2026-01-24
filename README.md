@@ -8,6 +8,13 @@
 go install github.com/rubysolo/envisible@latest
 ```
 
+or via homebrew:
+
+```bash
+brew tap rubysolo/tools
+brew install envisible
+```
+
 ## Quick Start
 
 ### 1. Generate Keys
@@ -99,7 +106,7 @@ This installs a `.git/hooks/pre-commit` script that runs `envisible check` on st
 
 - **Markers**: Look for `ENC[content]`.
 - **Encryption**: Replaces `ENC[content]` with `ENC[v1:base64_ciphertext]`.
-- **Keys**: 
+- **Keys**:
   - **Public Key**: Used for encryption. Can be shared.
   - **Private Key**: Used for decryption. Must be protected.
 
