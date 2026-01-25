@@ -19,10 +19,13 @@ var checkCmd = &cobra.Command{
 	Long: `Scans a file for ENC[...] markers.
 By default, it checks for unencrypted markers (not starting with 'v1:').
 If --verify is used, it also attempts to decrypt each marker with the private key to ensure validity.`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		filePath := args[0]
-		content, err := os.ReadFile(filePath)
+		targetFile := filePath
+		if len(args) > 0 {
+			targetFile = args[0]
+		}
+		content, err := os.ReadFile(targetFile)
 		if err != nil {
 			return fmt.Errorf("failed to read file: %w", err)
 		}
@@ -69,11 +72,11 @@ If --verify is used, it also attempts to decrypt each marker with the private ke
 		}
 
 		if unencryptedCount > 0 {
-			return fmt.Errorf("found %d unencrypted values in %s", unencryptedCount, filePath)
+			return fmt.Errorf("found %d unencrypted values in %s", unencryptedCount, targetFile)
 		}
 
 		if verificationFailedCount > 0 {
-			return fmt.Errorf("found %d invalid/corrupt values in %s", verificationFailedCount, filePath)
+			return fmt.Errorf("found %d invalid/corrupt values in %s", verificationFailedCount, targetFile)
 		}
 
 		msg := ""
@@ -83,7 +86,7 @@ If --verify is used, it also attempts to decrypt each marker with the private ke
 			msg = "All ENC[...] markers in %s appear to be encrypted."
 		}
 
-		ui.Success(msg, filePath)
+		ui.Success(msg, targetFile)
 		return nil
 	},
 }

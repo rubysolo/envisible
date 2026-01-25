@@ -9,6 +9,7 @@ import (
 var (
 	privKeyPath string
 	pubKeyPath  string
+	filePath    string
 )
 
 var rootCmd = &cobra.Command{
@@ -24,8 +25,9 @@ func Execute() error {
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&privKeyPath, "key", os.Getenv("ENVISIBLE_KEY_PATH"), "path to private key file (default: envisible.key)")
-	rootCmd.PersistentFlags().StringVar(&pubKeyPath, "pub", os.Getenv("ENVISIBLE_PUB_PATH"), "path to public key file (default: envisible.pub)")
+	rootCmd.PersistentFlags().StringVarP(&privKeyPath, "key", "k", os.Getenv("ENVISIBLE_KEY_PATH"), "path to private key file (default: envisible.key)")
+	rootCmd.PersistentFlags().StringVarP(&pubKeyPath, "pub", "p", os.Getenv("ENVISIBLE_PUB_PATH"), "path to public key file (default: envisible.pub)")
+	rootCmd.PersistentFlags().StringVarP(&filePath, "file", "f", os.Getenv("ENVISIBLE_FILE"), "path to env file (default: .env)")
 
 	// Set defaults if not provided
 	if privKeyPath == "" {
@@ -33,5 +35,8 @@ func init() {
 	}
 	if pubKeyPath == "" {
 		pubKeyPath = "envisible.pub"
+	}
+	if filePath == "" {
+		filePath = ".env"
 	}
 }

@@ -14,8 +14,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var envFile string
-
 var runCmd = &cobra.Command{
 	Use:   "run -- [command]",
 	Short: "Run a command with decrypted environment variables",
@@ -26,23 +24,24 @@ var runCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to read private key: %w", err)
 		}
-		
+
 		privKey, err := crypto.DecodeKey(string(privKeyData))
 		if err != nil {
 			return fmt.Errorf("failed to decode private key: %w", err)
 		}
 
-		content, err := os.ReadFile(envFile)
+		content, err := os.ReadFile(filePath)
 		if err != nil {
-			// If default .env is missing, maybe it's fine?
-			// But if explicitly provided and missing, it's an error.
-			if envFile != ".env" || !os.IsNotExist(err) {
+			// If .env default (no env var set, no flag) is missing, maybe it's fine?
+			// But if explicitly provided via flag or ENVISIBLE_FILE env var and missing, it's an error.
+			defaultNotSet := os.Getenv("ENVISIBLE_FILE") == "" && !cmd.Flags().Changed("file")
+			if !defaultNotSet || !os.IsNotExist(err) {
 				return fmt.Errorf("failed to read env file: %w", err)
 			}
-			// If .env is missing, just continue with current env
+			// If default .env is missing, just continue with current env
 			content = []byte{}
 		} else {
-			ui.Info("Loading environment from %s", envFile)
+			ui.Info("Loading environment from %s", filePath)
 		}
 
 		extraEnv, err := processor.ExtractEnv(content, privKey)
@@ -84,6 +83,5 @@ var runCmd = &cobra.Command{
 }
 
 func init() {
-	runCmd.Flags().StringVarP(&envFile, "env", "e", ".env", "env file to load")
 	rootCmd.AddCommand(runCmd)
 }

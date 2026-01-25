@@ -14,9 +14,12 @@ import (
 var editCmd = &cobra.Command{
 	Use:   "edit [file]",
 	Short: "Edit an encrypted file in your default editor",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		filePath := args[0]
+		targetFile := filePath
+		if len(args) > 0 {
+			targetFile = args[0]
+		}
 
 		// 1. Load keys
 		privKeyData, err := os.ReadFile(privKeyPath)
@@ -38,7 +41,7 @@ var editCmd = &cobra.Command{
 		}
 
 		// 2. Read and decrypt
-		content, err := os.ReadFile(filePath)
+		content, err := os.ReadFile(targetFile)
 		if err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("failed to read file: %w", err)
 		}
@@ -70,7 +73,7 @@ var editCmd = &cobra.Command{
 			editor = "vim"
 		}
 
-		ui.Info("Opening %s in %s...", filePath, editor)
+		ui.Info("Opening %s in %s...", targetFile, editor)
 		editorCmd := exec.Command(editor, tmpPath)
 		editorCmd.Stdin = os.Stdin
 		editorCmd.Stdout = cmd.OutOrStdout()
@@ -91,12 +94,12 @@ var editCmd = &cobra.Command{
 		}
 
 		// 6. Write back to original file
-		err = os.WriteFile(filePath, encrypted, 0644)
+		err = os.WriteFile(targetFile, encrypted, 0644)
 		if err != nil {
 			return fmt.Errorf("failed to write file: %w", err)
 		}
 
-		ui.Success("File %s updated and encrypted.", filePath)
+		ui.Success("File %s updated and encrypted.", targetFile)
 		return nil
 	},
 }

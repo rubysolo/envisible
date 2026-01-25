@@ -15,21 +15,24 @@ var inplace bool
 var encryptCmd = &cobra.Command{
 	Use:   "encrypt [file]",
 	Short: "Encrypt ENC[...] markers in a file",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		filePath := args[0]
-		
+		targetFile := filePath
+		if len(args) > 0 {
+			targetFile = args[0]
+		}
+
 		pubKeyData, err := os.ReadFile(pubKeyPath)
 		if err != nil {
 			return fmt.Errorf("failed to read public key: %w", err)
 		}
-		
+
 		pubKey, err := crypto.DecodeKey(string(pubKeyData))
 		if err != nil {
 			return fmt.Errorf("failed to decode public key: %w", err)
 		}
 
-		content, err := os.ReadFile(filePath)
+		content, err := os.ReadFile(targetFile)
 		if err != nil {
 			return fmt.Errorf("failed to read file: %w", err)
 		}
@@ -40,11 +43,11 @@ var encryptCmd = &cobra.Command{
 		}
 
 		if inplace {
-			err = os.WriteFile(filePath, encrypted, 0644)
+			err = os.WriteFile(targetFile, encrypted, 0644)
 			if err != nil {
 				return fmt.Errorf("failed to write file: %w", err)
 			}
-			ui.Success("File %s encrypted in-place.", filePath)
+			ui.Success("File %s encrypted in-place.", targetFile)
 		} else {
 			fmt.Fprint(cmd.OutOrStdout(), string(encrypted))
 		}

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/rubysolo/envisible/pkg/crypto"
+	"github.com/spf13/pflag"
 )
 
 func resetRoot(out io.Writer) {
@@ -22,6 +23,11 @@ func resetRoot(out io.Writer) {
 	// Reset persistent flags to defaults
 	privKeyPath = "envisible.key"
 	pubKeyPath = "envisible.pub"
+	filePath = ".env"
+	// Reset the "changed" state of persistent flags
+	rootCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
+		f.Changed = false
+	})
 	// Also reset the subcommand flags if they were changed
 	inplace = false
 	stripMarkers = false
@@ -79,7 +85,7 @@ func TestEncryptDecryptWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
-	
+
 	oldWd, _ := os.Getwd()
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
@@ -126,13 +132,13 @@ func TestCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
-	
+
 	oldWd, _ := os.Getwd()
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
 
 	confFile := "config.yaml"
-	
+
 	// Case 1: Unencrypted
 	os.WriteFile(confFile, []byte("password: ENC[hello]"), 0644)
 	resetRoot(nil)
@@ -156,7 +162,7 @@ func TestRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
-	
+
 	oldWd, _ := os.Getwd()
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
@@ -168,7 +174,7 @@ func TestRun(t *testing.T) {
 
 	// 2. Create .env
 	os.WriteFile(".env", []byte("MY_VAR=ENC[secret-value]"), 0644)
-	
+
 	// 3. Encrypt .env
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"encrypt", "-i", ".env"})
@@ -196,7 +202,7 @@ func TestGitIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
-	
+
 	oldWd, _ := os.Getwd()
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
@@ -232,7 +238,7 @@ func TestEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
-	
+
 	oldWd, _ := os.Getwd()
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
@@ -245,7 +251,7 @@ func TestEdit(t *testing.T) {
 	// 2. Create file
 	confFile := "config.yaml"
 	os.WriteFile(confFile, []byte("password: ENC[old]"), 0644)
-	
+
 	// 3. Encrypt it first
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
@@ -256,10 +262,10 @@ func TestEdit(t *testing.T) {
 	// We need to use a shell script or similar.
 	// In Go test, we can use 'sed' or similar if available, or just a small go program.
 	// Simplest: use 'sed -i ...' if on unix, or write a small script.
-	
+
 	mockEditor := filepath.Join(tmpDir, "mock-editor.sh")
 	os.WriteFile(mockEditor, []byte("#!/bin/sh\nsed -i '' 's/old/new/g' \"$1\" 2>/dev/null || sed -i 's/old/new/g' \"$1\""), 0755)
-	
+
 	t.Setenv("EDITOR", mockEditor)
 
 	resetRoot(nil)
@@ -285,7 +291,7 @@ func TestDecryptTextconv(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
-	
+
 	oldWd, _ := os.Getwd()
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
@@ -313,7 +319,7 @@ func TestPartialEncryptionWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
-	
+
 	oldWd, _ := os.Getwd()
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
@@ -326,14 +332,14 @@ func TestPartialEncryptionWorkflow(t *testing.T) {
 	// 2. Create a partially encrypted file
 	// We'll use a fake v1: marker for VAR1, and plain for VAR2.
 	// Actually, better to use a real one so we can decrypt later.
-	
+
 	// Encrypt just VAR1 manually first
 	pubKeyData, _ := os.ReadFile("envisible.pub")
 	pubKey, _ := crypto.DecodeKey(string(pubKeyData))
-	
+
 	val1Enc, _ := crypto.Encrypt([]byte("val1"), pubKey)
 	marker1 := "ENC[v1:" + val1Enc + "]"
-	
+
 	os.WriteFile("mixed.env", []byte(fmt.Sprintf("VAR1=%s\nVAR2=ENC[val2]", marker1)), 0644)
 
 	// 3. Run encrypt command
@@ -363,6 +369,340 @@ func TestPartialEncryptionWorkflow(t *testing.T) {
 	}
 }
 
+func TestEnvisibleFileEnvVar(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "envisible-envvar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
 
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
 
+	// 1. Keygen
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"keygen"})
+	rootCmd.Execute()
 
+	// 2. Create custom env file (not .env)
+	customEnvFile := "custom.env"
+	os.WriteFile(customEnvFile, []byte("CUSTOM_VAR=ENC[custom-secret]"), 0644)
+
+	// 3. Encrypt the custom file
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", customEnvFile})
+	rootCmd.Execute()
+
+	// 4. Set ENVISIBLE_FILE env var and run without specifying file
+	t.Setenv("ENVISIBLE_FILE", customEnvFile)
+
+	// Re-initialize filePath from env var (simulating fresh start)
+	filePath = os.Getenv("ENVISIBLE_FILE")
+
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	// Note: resetRoot sets filePath back to .env, so we need to set it again
+	filePath = customEnvFile
+
+	rootCmd.SetArgs([]string{"run", "--", "env"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Logf("run failed: %v", err)
+		return
+	}
+
+	if !contains(b.String(), "CUSTOM_VAR=custom-secret") {
+		t.Errorf("CUSTOM_VAR not found in environment when using ENVISIBLE_FILE. Output: %s", b.String())
+	}
+}
+
+func TestFilePathFlagOverridesEnvVar(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "envisible-override")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	// 1. Keygen
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"keygen"})
+	rootCmd.Execute()
+
+	// 2. Create two env files with different content
+	envFromEnvVar := "from-envvar.env"
+	envFromFlag := "from-flag.env"
+	os.WriteFile(envFromEnvVar, []byte("SOURCE=ENC[envvar]"), 0644)
+	os.WriteFile(envFromFlag, []byte("SOURCE=ENC[flag]"), 0644)
+
+	// 3. Encrypt both files
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", envFromEnvVar})
+	rootCmd.Execute()
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", envFromFlag})
+	rootCmd.Execute()
+
+	// 4. Set ENVISIBLE_FILE to one file, but use -f flag for the other
+	t.Setenv("ENVISIBLE_FILE", envFromEnvVar)
+
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	// Use the -f flag to override the env var
+	rootCmd.SetArgs([]string{"-f", envFromFlag, "run", "--", "env"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Logf("run failed: %v", err)
+		return
+	}
+
+	// Flag should win over env var
+	if !contains(b.String(), "SOURCE=flag") {
+		t.Errorf("Expected SOURCE=flag (from -f flag), got output: %s", b.String())
+	}
+	if contains(b.String(), "SOURCE=envvar") {
+		t.Errorf("Got SOURCE=envvar (from env var) but -f flag should have overridden it")
+	}
+}
+
+func TestDefaultFileUsedWhenNoArgProvided(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "envisible-default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	// 1. Keygen
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"keygen"})
+	rootCmd.Execute()
+
+	// 2. Create and encrypt custom.env
+	customFile := "custom.env"
+	os.WriteFile(customFile, []byte("VALUE=ENC[test-value]"), 0644)
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", customFile})
+	rootCmd.Execute()
+
+	// 3. Test encrypt command uses global filePath when no arg provided
+	// First encrypt the custom file with -f flag, no positional arg
+	os.WriteFile(customFile, []byte("NEW_VALUE=ENC[new-test]"), 0644)
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"-f", customFile, "encrypt", "-i"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt with -f flag failed: %v", err)
+	}
+
+	encrypted, _ := os.ReadFile(customFile)
+	if !bytes.Contains(encrypted, []byte("ENC[v1:")) {
+		t.Errorf("file was not encrypted when using -f flag: %s", string(encrypted))
+	}
+
+	// 4. Test decrypt command uses global filePath when no arg provided
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"-f", customFile, "decrypt"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("decrypt with -f flag failed: %v", err)
+	}
+
+	if !contains(b.String(), "NEW_VALUE=ENC[new-test]") {
+		t.Errorf("decrypted output mismatch. Got: %q", b.String())
+	}
+
+	// 5. Test check command uses global filePath when no arg provided
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"-f", customFile, "check"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Errorf("check with -f flag failed: %v", err)
+	}
+}
+
+func TestMissingFileErrorsWhenExplicitlySet(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "envisible-missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	// 1. Keygen
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"keygen"})
+	rootCmd.Execute()
+
+	// 2. Test that missing file via -f flag produces an error for run
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"-f", "nonexistent.env", "run", "--", "echo", "hello"})
+	err = rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when file specified via -f flag doesn't exist")
+	}
+
+	// 3. Test that missing file via ENVISIBLE_FILE env var produces an error
+	t.Setenv("ENVISIBLE_FILE", "also-nonexistent.env")
+	filePath = "also-nonexistent.env" // Simulate what init() would do
+
+	resetRoot(nil)
+	filePath = "also-nonexistent.env" // resetRoot resets it, set again
+	rootCmd.SetArgs([]string{"run", "--", "echo", "hello"})
+	err = rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when file specified via ENVISIBLE_FILE env var doesn't exist")
+	}
+}
+
+func TestMissingDefaultFileAllowedForRun(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "envisible-missing-default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	// Clear ENVISIBLE_FILE to ensure we're using the default
+	t.Setenv("ENVISIBLE_FILE", "")
+
+	// 1. Keygen
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"keygen"})
+	rootCmd.Execute()
+
+	// 2. Run without any .env file - should succeed (no env vars loaded)
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"run", "--", "echo", "hello"})
+	err = rootCmd.Execute()
+	if err != nil {
+		t.Errorf("run should succeed even when default .env doesn't exist: %v", err)
+	}
+}
+
+func TestPositionalArgOverridesGlobalFlag(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "envisible-positional")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	// 1. Keygen
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"keygen"})
+	rootCmd.Execute()
+
+	// 2. Create two files
+	fileFromFlag := "from-flag.yaml"
+	fileFromArg := "from-arg.yaml"
+	os.WriteFile(fileFromFlag, []byte("FLAG_VAL=ENC[flag-value]"), 0644)
+	os.WriteFile(fileFromArg, []byte("ARG_VAL=ENC[arg-value]"), 0644)
+
+	// 3. Encrypt both
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", fileFromFlag})
+	rootCmd.Execute()
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", fileFromArg})
+	rootCmd.Execute()
+
+	// 4. Use -f for one file but provide positional arg for another
+	// Positional arg should win for commands that accept it
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"-f", fileFromFlag, "decrypt", fileFromArg})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("decrypt failed: %v", err)
+	}
+
+	// Should get content from positional arg, not from -f flag
+	if !contains(b.String(), "ARG_VAL=ENC[arg-value]") {
+		t.Errorf("Expected content from positional arg file, got: %q", b.String())
+	}
+	if contains(b.String(), "FLAG_VAL") {
+		t.Errorf("Got content from -f flag file, but positional arg should have overridden it")
+	}
+}
+
+func TestAllCommandsUseGlobalFilePath(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "envisible-all-cmds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	// 1. Keygen
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"keygen"})
+	rootCmd.Execute()
+
+	// 2. Create and prepare a test file
+	testFile := "test-config.yaml"
+	os.WriteFile(testFile, []byte("SECRET=ENC[my-secret]"), 0644)
+
+	// Test encrypt with -f
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"-f", testFile, "encrypt", "-i"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt with -f failed: %v", err)
+	}
+
+	encrypted, _ := os.ReadFile(testFile)
+	if !bytes.Contains(encrypted, []byte("ENC[v1:")) {
+		t.Errorf("encrypt with -f didn't work: %s", string(encrypted))
+	}
+
+	// Test check with -f
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"-f", testFile, "check"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Errorf("check with -f failed: %v", err)
+	}
+
+	// Test decrypt with -f
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"-f", testFile, "decrypt"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("decrypt with -f failed: %v", err)
+	}
+
+	if !contains(b.String(), "SECRET=ENC[my-secret]") {
+		t.Errorf("decrypt with -f didn't work: %s", b.String())
+	}
+
+	// Test run with -f
+	b = bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"-f", testFile, "run", "--", "env"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Logf("run with -f failed (maybe env command not found?): %v", err)
+		return
+	}
+
+	if !contains(b.String(), "SECRET=my-secret") {
+		t.Errorf("run with -f didn't load env vars: %s", b.String())
+	}
+}

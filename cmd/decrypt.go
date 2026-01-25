@@ -17,11 +17,14 @@ var (
 var decryptCmd = &cobra.Command{
 	Use:   "decrypt [file]",
 	Short: "Decrypt ENC[v1:...] markers in a file",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		filePath := args[0]
+		targetFile := filePath
+		if len(args) > 0 {
+			targetFile = args[0]
+		}
 
-		content, err := os.ReadFile(filePath)
+		content, err := os.ReadFile(targetFile)
 		if err != nil {
 			return fmt.Errorf("failed to read file: %w", err)
 		}
@@ -54,7 +57,7 @@ var decryptCmd = &cobra.Command{
 		}
 
 		if inplace {
-			err = os.WriteFile(filePath, decrypted, 0644)
+			err = os.WriteFile(targetFile, decrypted, 0644)
 			if err != nil {
 				return fmt.Errorf("failed to write file: %w", err)
 			}
