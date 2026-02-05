@@ -5,6 +5,7 @@ go 1.20
 require (
 	github.com/charmbracelet/lipgloss v0.6.0
 	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.10
 	golang.org/x/crypto v0.1.0
 )
 
@@ -17,6 +18,5 @@ require (
 	github.com/muesli/reflow v0.2.1-0.20210115123740-9e1d0d53df68 // indirect
 	github.com/muesli/termenv v0.14.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/spf13/pflag v1.0.10 // indirect
 	golang.org/x/sys v0.1.0 // indirect
 )
