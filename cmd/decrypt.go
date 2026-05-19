@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/rubysolo/envisible/pkg/crypto"
 	"github.com/rubysolo/envisible/pkg/processor"
 	"github.com/spf13/cobra"
 )
@@ -29,25 +28,16 @@ var decryptCmd = &cobra.Command{
 			return fmt.Errorf("failed to read file: %w", err)
 		}
 
-		privKeyData, err := os.ReadFile(privKeyPath)
+		dec, err := loadDecryptor(cmd.Context())
 		if err != nil {
 			if textconv {
 				fmt.Fprint(cmd.OutOrStdout(), string(content))
 				return nil
 			}
-			return fmt.Errorf("failed to read private key: %w", err)
+			return err
 		}
 
-		privKey, err := crypto.DecodeKey(string(privKeyData))
-		if err != nil {
-			if textconv {
-				fmt.Fprint(cmd.OutOrStdout(), string(content))
-				return nil
-			}
-			return fmt.Errorf("failed to decode private key: %w", err)
-		}
-
-		decrypted, err := processor.DecryptContent(content, privKey, !stripMarkers)
+		decrypted, err := processor.DecryptContent(cmd.Context(), content, dec, !stripMarkers)
 		if err != nil {
 			if textconv {
 				fmt.Fprint(cmd.OutOrStdout(), string(content))

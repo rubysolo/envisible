@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/rubysolo/envisible/pkg/crypto"
 	"github.com/rubysolo/envisible/pkg/processor"
 	"github.com/rubysolo/envisible/pkg/ui"
 	"github.com/spf13/cobra"
@@ -21,23 +20,10 @@ var editCmd = &cobra.Command{
 			targetFile = args[0]
 		}
 
-		// 1. Load keys
-		privKeyData, err := os.ReadFile(privKeyPath)
+		// 1. Load keys (need both halves to round-trip)
+		enc, dec, err := loadProvider(cmd.Context())
 		if err != nil {
-			return fmt.Errorf("failed to read private key: %w", err)
-		}
-		privKey, err := crypto.DecodeKey(string(privKeyData))
-		if err != nil {
-			return fmt.Errorf("failed to decode private key: %w", err)
-		}
-
-		pubKeyData, err := os.ReadFile(pubKeyPath)
-		if err != nil {
-			return fmt.Errorf("failed to read public key: %w", err)
-		}
-		pubKey, err := crypto.DecodeKey(string(pubKeyData))
-		if err != nil {
-			return fmt.Errorf("failed to decode public key: %w", err)
+			return err
 		}
 
 		// 2. Read and decrypt
@@ -49,7 +35,7 @@ var editCmd = &cobra.Command{
 			content = []byte{}
 		}
 
-		decrypted, err := processor.DecryptContent(content, privKey, true)
+		decrypted, err := processor.DecryptContent(cmd.Context(), content, dec, true)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt content: %w", err)
 		}
@@ -88,7 +74,7 @@ var editCmd = &cobra.Command{
 			return fmt.Errorf("failed to read edited content: %w", err)
 		}
 
-		encrypted, err := processor.EncryptContent(editedContent, pubKey)
+		encrypted, err := processor.EncryptContent(editedContent, enc)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt content: %w", err)
 		}

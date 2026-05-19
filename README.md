@@ -1,6 +1,11 @@
 # Envisible
 
-**Envisible** is a CLI tool to safely manage encrypted secrets within your configuration files (YAML, JSON, TOML, .env, etc.) using explicit `ENC[...]` markers. It uses NaCl Box (Curve25519, XSalsa20, Poly1305) for strong asymmetric encryption.
+**Envisible** is a CLI tool to safely manage encrypted secrets within your configuration files (YAML, JSON, TOML, .env, etc.) using explicit `ENC[...]` markers.
+
+Two key-management modes are supported:
+
+- **Local keypair** (default) — a NaCl Box keypair (Curve25519 + XSalsa20-Poly1305) generated with `envisible keygen`. Simple, no network, no cost. The private key file (`envisible.key`) must be kept off-repo and provisioned to anything that needs to decrypt.
+- **Cloud KMS** — an asymmetric RSA-OAEP-SHA-256 key in **Google Cloud KMS**, **AWS KMS**, or **Azure Key Vault**. The private half never leaves the cloud; only the public key is downloaded into `envisible.pub`. Decryption authenticates via the cloud SDK's default credential chain (gcloud auth / IAM role / Managed Identity / etc.). See [Cloud KMS-backed keys](#cloud-kms-backed-keys) below.
 
 ## Installation
 
@@ -75,6 +80,119 @@ Ensure no unencrypted secrets are committed:
 ```bash
 envisible check config.yaml
 ```
+
+## Cloud KMS-backed keys
+
+In Cloud KMS mode, the project's asymmetric private key lives in GCP KMS / AWS KMS / Azure Key Vault and never leaves it. Only the public key is downloaded into `envisible.pub` — the file is safe to commit. Decryption (`envisible run`, `envisible decrypt`, `envisible edit`) authenticates to the cloud at runtime using each SDK's default credential chain.
+
+### Wire format
+
+Cloud-backed values use a `v2:` envelope marker:
+
+```
+ENC[v2:base64( RSA-OAEP-SHA256(data_key) || nonce || secretbox.Seal(plaintext, nonce, data_key) )]
+```
+
+For each value, envisible generates a random 32-byte data key, seals the payload locally with NaCl secretbox, and wraps the data key with the KMS public key via stdlib RSA-OAEP. **No network at encrypt time.** At decrypt time the wrapped data key is sent to KMS for unwrapping — one call per `ENC[...]` value, parallelized inside `envisible run`.
+
+Plaintexts are unbounded in size (PEM keys, certificates, etc. — the envelope handles them).
+
+### Choosing a setup path
+
+You have a key already (Terraform, console, gcloud, etc.):
+
+```bash
+envisible kms init --provider gcp \
+    --resource projects/P/locations/L/keyRings/R/cryptoKeys/K/cryptoKeyVersions/N
+```
+
+You want envisible to provision the key (requires KMS-admin permission):
+
+```bash
+envisible kms create --provider gcp \
+    --project P --location L --keyring R --name K
+```
+
+Both commands end the same way: `envisible.pub` is written with the key's public half + the resource pointer. From there, `envisible encrypt` / `envisible run` work just like the local-keypair case — no `envisible.key` is needed.
+
+### Per-provider quick setup
+
+**GCP KMS** — create an asymmetric decryption key:
+
+```bash
+# One-time: provision the keyring and key
+gcloud kms keyrings create my-app --location us
+gcloud kms keys create my-key \
+    --keyring my-app --location us \
+    --purpose asymmetric-encryption \
+    --default-algorithm rsa-decrypt-oaep-2048-sha256
+
+# Register with envisible
+envisible kms init --provider gcp \
+    --resource projects/MY-PROJECT/locations/us/keyRings/my-app/cryptoKeys/my-key/cryptoKeyVersions/1
+```
+
+Auth: any source picked up by Application Default Credentials — `gcloud auth application-default login` for local dev, workload identity in GKE, service-account JSON via `GOOGLE_APPLICATION_CREDENTIALS`. Required roles: `cloudkms.viewer` to read the public key during `kms init`, `cloudkms.cryptoKeyDecrypter` at decrypt time.
+
+**AWS KMS** — create an asymmetric customer-managed key:
+
+```bash
+aws kms create-key \
+    --key-spec RSA_2048 \
+    --key-usage ENCRYPT_DECRYPT \
+    --description "envisible asymmetric envelope key"
+# (note the KeyId from the output)
+aws kms create-alias --alias-name alias/my-app --target-key-id <KEY_ID>
+
+# Register with envisible — full ARN or alias ARN both work
+envisible kms init --provider aws \
+    --resource arn:aws:kms:us-east-1:123456789012:key/<KEY_ID>
+```
+
+Auth: the AWS SDK's standard credential chain — env vars, `~/.aws/credentials`, IMDSv2 on EC2, IRSA in EKS, SSO. Required actions: `kms:GetPublicKey` for init, `kms:Decrypt` at runtime.
+
+**Azure Key Vault** — create an RSA-2048 key:
+
+```bash
+az keyvault key create \
+    --vault-name myvault \
+    --name my-key \
+    --kty RSA \
+    --size 2048
+
+# Register with envisible — note the version segment is required
+envisible kms init --provider azure \
+    --resource https://myvault.vault.azure.net/keys/my-key/<VERSION>
+```
+
+Auth: `DefaultAzureCredential` — `az login` for local dev, managed identity on Azure compute, env vars (`AZURE_CLIENT_ID`/`AZURE_TENANT_ID`/`AZURE_CLIENT_SECRET`) for service principals. Required permissions: `keys/get` to read the public key during init, `keys/decrypt` at runtime.
+
+### Rotation
+
+To rotate to a new key version (or a different key under the same provider):
+
+```bash
+# 1. Create the new version
+gcloud kms keys versions create --location us --keyring my-app --key my-key
+#    (note the new version number, e.g. 2)
+
+# 2. Re-wrap every v2 marker in the file. The secretbox payload stays bit-for-bit
+#    identical; only the wrapped data key is swapped. envisible.pub is updated
+#    last to point at the new resource.
+envisible kms rotate --to projects/.../cryptoKeyVersions/2 config.yaml .env
+
+# 3. Once you've confirmed everything decrypts with the new version, disable
+#    or destroy the old version via your cloud provider's UI/CLI.
+```
+
+Rotation is same-provider only. For cross-provider migration (e.g. GCP → AWS), decrypt with the old key, then `kms init` against the new provider and re-encrypt.
+
+### Notes & caveats
+
+- **`envisible.pub` is required at decrypt time in v2 mode.** It carries the KMS resource pointer. With a local NaCl key, decrypt only needs `envisible.key` and `envisible.pub` is optional at runtime — that property changes when you switch to KMS. Commit `envisible.pub`.
+- **Mixed v1/v2 files work during transition.** If a project has both `envisible.pub` pointing at a KMS key (v2) and a leftover `envisible.key` (v1 NaCl), envisible builds a composite decryptor that opens both marker versions. New encrypts go to whichever format `envisible.pub` describes.
+- **`envisible run` introduces a boot-time network dependency.** Each unique wrapped data key in the file costs one KMS `Decrypt` call. With dozens of secrets the SDK parallelizes these into a single round-trip's wall-time, but the dependency is real — provision IAM/credentials accordingly.
+- **Authenticated but not bound.** RSA-OAEP authenticates the data key under the KMS public key; NaCl secretbox authenticates the payload under the data key. The pairing between them isn't authenticated as a unit, so an attacker who can write to the file could swap whole envelopes between values and cause a downstream secretbox decrypt to fail. File integrity is git's job in this threat model; this is worth knowing but not a known attack path against a well-managed repo.
 
 ## Git Integration
 

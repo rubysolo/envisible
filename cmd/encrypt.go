@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/rubysolo/envisible/pkg/crypto"
 	"github.com/rubysolo/envisible/pkg/processor"
 	"github.com/rubysolo/envisible/pkg/ui"
 	"github.com/spf13/cobra"
@@ -22,14 +21,9 @@ var encryptCmd = &cobra.Command{
 			targetFile = args[0]
 		}
 
-		pubKeyData, err := os.ReadFile(pubKeyPath)
+		enc, err := loadEncryptor()
 		if err != nil {
-			return fmt.Errorf("failed to read public key: %w", err)
-		}
-
-		pubKey, err := crypto.DecodeKey(string(pubKeyData))
-		if err != nil {
-			return fmt.Errorf("failed to decode public key: %w", err)
+			return err
 		}
 
 		content, err := os.ReadFile(targetFile)
@@ -37,7 +31,7 @@ var encryptCmd = &cobra.Command{
 			return fmt.Errorf("failed to read file: %w", err)
 		}
 
-		encrypted, err := processor.EncryptContent(content, pubKey)
+		encrypted, err := processor.EncryptContent(content, enc)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt content: %w", err)
 		}

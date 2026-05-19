@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/rubysolo/envisible/pkg/crypto"
+	kmspkg "github.com/rubysolo/envisible/pkg/kms"
 	"github.com/spf13/pflag"
 )
 
@@ -32,6 +35,14 @@ func resetRoot(out io.Writer) {
 	inplace = false
 	stripMarkers = false
 	textconv = false
+	// kms init / create flag vars persist across cobra Execute calls because
+	// they're package-level — reset them so subsequent tests start clean.
+	kmsInitProvider, kmsInitResource = "", ""
+	kmsCreateProvider, kmsCreateName = "", ""
+	gcpCreateProject, gcpCreateLocation, gcpCreateKeyring = "", "", ""
+	awsCreateRegion, awsCreateAlias = "", ""
+	azCreateVault = ""
+	kmsRotateTo = ""
 }
 
 func TestRootHelp(t *testing.T) {
@@ -77,6 +88,61 @@ func TestKeygen(t *testing.T) {
 
 func contains(s, substr string) bool {
 	return bytes.Contains([]byte(s), []byte(substr))
+}
+
+func TestEncryptDecryptV2Workflow(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	// Generate a local RSA key and swap GCP's registry entries to use it.
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	resource := "projects/test/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
+	restore := withFakeKMSProvider(t, kmspkg.GCP, priv, resource)
+	defer restore()
+
+	// Bootstrap envisible.pub via `kms init` against the fake.
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"kms", "init", "--provider", "gcp", "--resource", resource})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("kms init: %v", err)
+	}
+
+	// Encrypt a file. No envisible.key should be needed.
+	if _, err := os.Stat("envisible.key"); err == nil {
+		t.Fatalf("envisible.key should not exist in v2-only project")
+	}
+	confFile := "config.yaml"
+	os.WriteFile(confFile, []byte("password: ENC[hello-kms]\napi: ENC[long-cert-data]"), 0644)
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	encrypted, _ := os.ReadFile(confFile)
+	if !bytes.Contains(encrypted, []byte("ENC[v2:")) {
+		t.Errorf("expected v2 marker, got: %s", string(encrypted))
+	}
+	if bytes.Contains(encrypted, []byte("hello-kms")) {
+		t.Errorf("plaintext leaked into encrypted file: %s", string(encrypted))
+	}
+
+	// Decrypt to stdout via the fake unwrapper.
+	b := &bytes.Buffer{}
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"decrypt", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("decrypt: %v", err)
+	}
+	if !bytes.Contains(b.Bytes(), []byte("password: ENC[hello-kms]")) || !bytes.Contains(b.Bytes(), []byte("api: ENC[long-cert-data]")) {
+		t.Errorf("decrypt output missing recovered values: %q", b.String())
+	}
 }
 
 func TestEncryptDecryptWorkflow(t *testing.T) {
@@ -147,12 +213,31 @@ func TestCheck(t *testing.T) {
 		t.Error("expected error for unencrypted value")
 	}
 
-	// Case 2: Encrypted (fake it for check)
+	// Case 2: Has a v1: prefix but is structurally too short to be a real ciphertext.
+	// Pre-step-11 this would have passed; the structure check should now flag it.
 	os.WriteFile(confFile, []byte("password: ENC[v1:fake]"), 0644)
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"check", confFile})
+	if err := rootCmd.Execute(); err == nil {
+		t.Errorf("expected check to flag truncated v1: marker as malformed")
+	}
+
+	// Case 3: A real encrypted value — must pass the default structure check.
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"keygen"})
 	if err := rootCmd.Execute(); err != nil {
-		t.Errorf("unexpected error for encrypted value: %v", err)
+		t.Fatalf("keygen: %v", err)
+	}
+	os.WriteFile(confFile, []byte("password: ENC[real-secret]"), 0644)
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"check", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Errorf("check should pass for a real v1 ciphertext: %v", err)
 	}
 }
 

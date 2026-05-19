@@ -39,7 +39,7 @@
         - `encrypt`/`decrypt`: Clearer status indicators for processing.
         - `run`: Visual confirmation that the proper environment is being configured before executing the given command
 - [X] **Git Integration**: Investigate `git diff` drivers to show plaintext diffs locally (if keys are present).
-- [ ] **Cloud Key Providers**: Abstract `pkg/crypto` to support AWS KMS / GCP KMS / Vault (Deferred).
+- [X] **Cloud Key Providers**: KMS-backed v2 envelope format with GCP KMS / AWS KMS / Azure Key Vault. `envisible kms init` / `kms create` / `kms rotate`. v1 (local NaCl) and v2 (KMS) coexist side-by-side; mixed-marker files supported via composite decryptor.
 - [ ] **IDE Integration**: VS Code plugin for auto-encrypt on save (Deferred).
 - [X] **Pre-commit Hooks**: Helper script to ensure no plaintext `ENC[...]` markers are committed.
 - [X] **Release**: Setup GitHub Actions for cross-platform binary builds.

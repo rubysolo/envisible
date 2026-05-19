@@ -8,7 +8,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/rubysolo/envisible/pkg/crypto"
 	"github.com/rubysolo/envisible/pkg/processor"
 	"github.com/rubysolo/envisible/pkg/ui"
 	"github.com/spf13/cobra"
@@ -19,15 +18,9 @@ var runCmd = &cobra.Command{
 	Short: "Run a command with decrypted environment variables",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Load and decrypt env file
-		privKeyData, err := os.ReadFile(privKeyPath)
+		dec, err := loadDecryptor(cmd.Context())
 		if err != nil {
-			return fmt.Errorf("failed to read private key: %w", err)
-		}
-
-		privKey, err := crypto.DecodeKey(string(privKeyData))
-		if err != nil {
-			return fmt.Errorf("failed to decode private key: %w", err)
+			return err
 		}
 
 		content, err := os.ReadFile(filePath)
@@ -44,7 +37,7 @@ var runCmd = &cobra.Command{
 			ui.Info("Loading environment from %s", filePath)
 		}
 
-		extraEnv, err := processor.ExtractEnv(content, privKey)
+		extraEnv, err := processor.ExtractEnv(cmd.Context(), content, dec)
 		if err != nil {
 			return fmt.Errorf("failed to process env file: %w", err)
 		}
