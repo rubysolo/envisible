@@ -25,10 +25,14 @@ This skill walks the agent through a clean setup. Do not skip discovery — half
 
 Before changing anything, run these in parallel:
 
-1. **Confirm envisible is installed**: `which envisible` and `envisible version`. If missing, install:
+1. **Confirm envisible is installed and KMS-capable**: `which envisible`, `envisible version`, and `envisible kms --help`.
+  - If `kms` is unavailable, upgrade to a KMS-capable release before choosing KMS mode.
+  - Do this check anywhere envisible is installed, not just on your laptop (Docker images, CI runners, release/runtime environments).
+  - If missing, install:
    - `go install github.com/rubysolo/envisible@latest` (needs Go)
    - or `brew tap rubysolo/tools && brew install envisible` (macOS/Linux)
    - or download a release from https://github.com/rubysolo/envisible/releases
+
 2. **Find candidate files** for secrets:
    ```bash
    # env-style files
@@ -37,6 +41,7 @@ Before changing anything, run these in parallel:
    find . \( -name '*.yaml' -o -name '*.yml' -o -name '*.json' -o -name '*.toml' \) \
      -not -path './node_modules/*' -not -path './.git/*' -not -path './vendor/*'
    ```
+
 3. **Scan for plaintext-looking secrets** — `grep -RInE '(password|secret|token|api[_-]?key|aws_|private[_-]?key)\s*[:=]' --include='*.{env,yaml,yml,json,toml,ini}' .` — and surface them to the user for triage before you encrypt anything.
 4. **Check `.gitignore`** for `envisible.key`, `*.key`, `.env`. Note what's already protected.
 5. **Read `package.json` / `Makefile` / `Procfile` / `docker-compose.yml` / CI workflow files** — these are where the runtime command lives, and they're what you'll wrap with `envisible run`.
@@ -72,6 +77,15 @@ Then:
 
 Pick the provider the user already authenticates with. The three flows differ only in the resource string.
 
+Before proceeding, re-check the installed binary supports KMS commands:
+
+```bash
+envisible version
+envisible kms --help
+```
+
+If `kms` is unavailable, stop and upgrade envisible first.
+
 **GCP**:
 ```bash
 gcloud kms keyrings create my-app --location us
@@ -79,9 +93,15 @@ gcloud kms keys create my-key \
   --keyring my-app --location us \
   --purpose asymmetric-encryption \
   --default-algorithm rsa-decrypt-oaep-2048-sha256
+# Important: envisible uses Application Default Credentials (ADC),
+# not only gcloud CLI login state.
+gcloud auth application-default login
 envisible kms init --provider gcp \
   --resource projects/PROJECT/locations/us/keyRings/my-app/cryptoKeys/my-key/cryptoKeyVersions/1
 ```
+
+Important for GCP: `envisible kms init` and KMS-backed decrypts use ADC. `gcloud auth login`
+alone is often not enough for local runs.
 
 **AWS**:
 ```bash
@@ -102,13 +122,25 @@ envisible kms init --provider azure \
 
 If the user already has a key provisioned (Terraform, console), skip the create step and run `envisible kms init` straight against the existing resource.
 
+If the project already manages cloud infrastructure with Terraform/Terragrunt, prefer Terraform
+to create and IAM-bind the KMS key and use `envisible kms init` only to materialize `envisible.pub`.
+Avoid mixing `envisible kms create` with Terraform-managed infrastructure long-term.
+
 Then:
 1. **Commit `envisible.pub`** — required at decrypt time in v2 mode (it carries the KMS pointer). This is non-negotiable; the file is safe.
-2. **Verify IAM/roles** for every identity that needs to decrypt (dev laptops, CI, production):
-   - GCP: `roles/cloudkms.cryptoKeyDecrypter` on the key
+2. **Wire runtime correctly for Docker/Cloud Run KMS mode**:
+  - Commit `envisible.pub` into the image/repo.
+  - Do not inject `envisible.key` or `ENVISIBLE_KEY`.
+  - Start with `--pub` (not `--key`) and the target env file, for example:
+    `envisible run --pub /app/envisible.pub -f /app/.env -- ./myapp`
+  - Ensure the runtime identity can decrypt.
+3. **Verify IAM/roles** for every identity that needs to decrypt (dev laptops, CI, production):
+  - For deployed containers, the critical identity is the runtime identity (for example, the Cloud Run service account), not only the CI/deploy identity.
+  - GCP: `roles/cloudkms.cryptoKeyDecrypter` on the crypto key
    - AWS: `kms:Decrypt` (and `kms:GetPublicKey` for `kms init`)
    - Azure: `keys/decrypt` (and `keys/get` for init)
-3. **Do not add `envisible.key` to `.gitignore` for any special reason** — it shouldn't exist in KMS mode. If it does, delete it.
+4. **Note on GCP IAM scope**: `envisible.pub` may reference a specific `cryptoKeyVersion`, but IAM bindings are typically granted on the parent `cryptoKey` resource.
+5. **Do not add `envisible.key` to `.gitignore` for any special reason** — it shouldn't exist in KMS mode. If it does, delete it.
 
 ---
 
@@ -126,17 +158,27 @@ For each plaintext secret the user confirmed in Step 1:
    database:
      url: postgres://user:ENC[hunter2]@db.internal:5432/app
    ```
+
 2. **Encrypt in place**:
    ```bash
    envisible encrypt -i path/to/file.yaml
    envisible encrypt -i .env
    ```
-3. **Verify** — grep the file for `ENC[v` to confirm everything is wrapped; the file should no longer contain plaintext. Also run `envisible check path/to/file` — it exits non-zero if any `ENC[...]` marker is still unencrypted (i.e. doesn't start with `v1:` or `v2:`).
+
+3. **Verify** — grep the file for `ENC[..]` markers and confirm everything is encrypted; the file should no longer contain plaintext. Also run `envisible check path/to/file` — it exits non-zero if any `ENC[...]` marker is still unencrypted (i.e. doesn't start with `v1:` or `v2:`).
+
 4. **Test round-trip**:
    ```bash
    envisible decrypt --strip path/to/file.yaml | diff - <original-plaintext-version>
    ```
    (or just spot-check `envisible decrypt path/to/file.yaml | head`).
+
+5. **Integrate with existing lint/static analysis:**
+
+If the project already has a lint or static analysis command (e.g. `make lint`, `npm run lint`), wire `envisible
+check` into that command so secret checks always run with the rest of your code quality gates.  This ensures
+unencrypted secrets are caught early and consistently.  If there isn't an existing lint step, consider adding a new
+one that runs `envisible check` against all candidate files.
 
 ---
 
@@ -145,7 +187,7 @@ For each plaintext secret the user confirmed in Step 1:
 This is project-specific. Common patterns:
 
 ### Env-style files (`.env`)
-For apps that read env vars at startup, replace the plaintext launch command with `envisible run -e <envfile> --`:
+For apps that read env vars at startup, prefix the plaintext launch command with `envisible run -e <envfile> --`:
 
 ```bash
 # before
@@ -249,10 +291,16 @@ Authenticate the runner to the cloud (workload identity federation for GitHub Ac
 - run: envisible run -e .env.test -- npm test
 ```
 
-In both cases, add a **lint job** that runs `envisible check` against all candidate files so unencrypted markers fail PRs:
+In both cases, add a **lint job** in CI that runs `envisible check` against all candidate files so unencrypted markers fail PRs:
+
+
 ```yaml
 - name: Check for unencrypted secrets
-  run: envisible check .env .env.production config/*.yaml
+  run: |
+    for f in .env .env.production config/*.yaml; do
+      [ -e "$f" ] || continue
+      envisible check "$f"
+    done
 ```
 
 ---
@@ -288,6 +336,7 @@ Add a short section to the project README (or a `SECRETS.md`) covering:
 - **Wrong file got `-i`.** `envisible encrypt -i` overwrites; back up or stage first so a mistake is reversible (`git checkout -- file`).
 - **`ENC[]` marker inside a string that gets templated/escaped.** YAML anchors, JSON inside a string, shell `$()`... encryption operates on raw bytes between the brackets, so triple-check anything not literal.
 - **CI can't decrypt** in KMS mode → the runner identity is missing the role. Test locally with `gcloud auth print-access-token` / `aws sts get-caller-identity` to confirm credential plumbing before blaming envisible.
+- **GCP local auth confusion**: `gcloud auth login` and ADC are not the same. If local KMS calls fail, run `gcloud auth application-default login` and retry.
 - **KMS mode without committing `envisible.pub`.** Decryption fails with no obvious error — the resource pointer lives in that file. Commit it.
 - **Mixing v1 and v2 in the same file** works during migration (envisible builds a composite decryptor when both `envisible.key` and a v2-flagged `envisible.pub` exist), but don't leave it that way long-term. Pick a mode and re-encrypt.
 
@@ -307,7 +356,7 @@ Add a short section to the project README (or a `SECRETS.md`) covering:
 | Decrypt to stdout, no markers | `envisible decrypt --strip <file>` |
 | Edit in `$EDITOR` (decrypt → edit → encrypt) | `envisible edit <file>` |
 | Run with decrypted env injected | `envisible run -e <envfile> -- <cmd> <args...>` |
-| CI lint for unencrypted markers | `envisible check <file>...` |
+| CI lint for unencrypted markers | `for f in <files>; do envisible check "$f"; done` |
 | Install pre-commit hook | `envisible git install-hook` |
 | Set up git diff driver | `envisible git setup` |
 | Rotate KMS version | `envisible kms rotate --to <new-resource> <file>...` |
