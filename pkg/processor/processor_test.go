@@ -71,6 +71,102 @@ OTHER=plain
 	}
 }
 
+func TestEncryptSkipsMarkersInComments(t *testing.T) {
+	pub, priv, err := crypto.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("Failed to generate keys: %v", err)
+	}
+
+	content := []byte("# ENC[full-line-comment]\n" +
+		"DB_PASSWORD=ENC[supersecret]  # old: ENC[oldsecret]\n" +
+		"   # ENC[indented-comment]\n" +
+		"NOTE=plain # trailing ENC[also-comment]\n" +
+		"HASHY=ENC[p@ss # word]\n" +
+		"NOSPACE=ENC[a#b]\n")
+
+	encrypted, err := EncryptContent(content, NaclEncryptor{PublicKey: pub})
+	if err != nil {
+		t.Fatalf("Encryption failed: %v", err)
+	}
+
+	// Comment-bound markers must be left literal.
+	commentLiterals := [][]byte{
+		[]byte("# ENC[full-line-comment]"),
+		[]byte("# old: ENC[oldsecret]"),
+		[]byte("# ENC[indented-comment]"),
+		[]byte("# trailing ENC[also-comment]"),
+	}
+	for _, want := range commentLiterals {
+		if !bytes.Contains(encrypted, want) {
+			t.Errorf("expected commented marker %q to be preserved verbatim", want)
+		}
+	}
+
+	// Real values must be encrypted, including ones whose plaintext contains '#'.
+	for _, plain := range [][]byte{
+		[]byte("ENC[supersecret]"),
+		[]byte("ENC[p@ss # word]"),
+		[]byte("ENC[a#b]"),
+	} {
+		if bytes.Contains(encrypted, plain) {
+			t.Errorf("expected plaintext marker %q to be encrypted", plain)
+		}
+	}
+	for _, prefix := range [][]byte{
+		[]byte("DB_PASSWORD=ENC[v1:"),
+		[]byte("HASHY=ENC[v1:"),
+		[]byte("NOSPACE=ENC[v1:"),
+	} {
+		if !bytes.Contains(encrypted, prefix) {
+			t.Errorf("expected %q in encrypted output", prefix)
+		}
+	}
+
+	// Round-trip: decrypting (keepMarkers) must reproduce the original content.
+	// The commented markers carry no version prefix so DecryptContent leaves
+	// them untouched, while the real values come back as ENC[plaintext].
+	decrypted, err := DecryptContent(context.Background(), encrypted, NaclDecryptor{PrivateKey: priv}, true)
+	if err != nil {
+		t.Fatalf("Decryption failed: %v", err)
+	}
+	if !bytes.Equal(decrypted, content) {
+		t.Errorf("round trip mismatch.\nwant:\n%s\ngot:\n%s", content, decrypted)
+	}
+}
+
+func TestDecryptSkipsMarkersInComments(t *testing.T) {
+	// Symmetric to TestEncryptSkipsMarkersInComments: a real ciphertext sitting
+	// in a comment (e.g. an old value kept for reference) must be left literal
+	// rather than decrypted — otherwise plaintext leaks back into the comment.
+	pub, priv, _ := crypto.GenerateKeypair()
+	enc := NaclEncryptor{PublicKey: pub}
+	dec := NaclDecryptor{PrivateKey: priv}
+
+	liveInner, _ := enc.EncryptValue([]byte("live-secret"))
+	staleInner, _ := enc.EncryptValue([]byte("stale-secret"))
+
+	content := []byte("PASSWORD=ENC[" + liveInner + "]  # old: ENC[" + staleInner + "]\n" +
+		"# ENC[" + staleInner + "]\n")
+
+	got, err := DecryptContent(context.Background(), content, dec, true)
+	if err != nil {
+		t.Fatalf("DecryptContent: %v", err)
+	}
+
+	if !bytes.Contains(got, []byte("PASSWORD=ENC[live-secret]")) {
+		t.Errorf("live value should be decrypted; got:\n%s", got)
+	}
+	if !bytes.Contains(got, []byte("# old: ENC["+staleInner+"]")) {
+		t.Errorf("trailing-comment ciphertext should not be decrypted; got:\n%s", got)
+	}
+	if !bytes.Contains(got, []byte("# ENC["+staleInner+"]")) {
+		t.Errorf("full-line-comment ciphertext should not be decrypted; got:\n%s", got)
+	}
+	if bytes.Contains(got, []byte("stale-secret")) {
+		t.Errorf("stale secret leaked into output; got:\n%s", got)
+	}
+}
+
 func TestPartialEncryption(t *testing.T) {
 	pub, priv, err := crypto.GenerateKeypair()
 	if err != nil {

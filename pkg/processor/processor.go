@@ -1,6 +1,7 @@
 package processor
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -234,44 +235,105 @@ func (c CompositeDecryptor) DecryptMarker(ctx context.Context, inner string) ([]
 
 // EncryptContent scans for ENC[plaintext] markers and rewrites each to ENC[<inner>]
 // using enc. Already-encrypted markers (any ENC[vN:...]) are left untouched, which
-// makes the operation idempotent and preserves foreign-version ciphertexts.
+// makes the operation idempotent and preserves foreign-version ciphertexts. Markers
+// appearing inside a comment (a '#' at line start or preceded by whitespace, in the
+// YAML/TOML/.env convention) are also left alone so old values kept for reference
+// don't get silently re-encrypted.
 func EncryptContent(content []byte, enc Encryptor) ([]byte, error) {
 	var lastErr error
-	result := encRegex.ReplaceAllFunc(content, func(match []byte) []byte {
-		inner := string(match[4 : len(match)-1])
-		if IsEncryptedInner(inner) {
-			return match
-		}
-		out, err := enc.EncryptValue([]byte(inner))
-		if err != nil {
-			lastErr = err
-			return match
-		}
-		return []byte(fmt.Sprintf("ENC[%s]", out))
+	result := walkOutsideComments(content, func(code []byte) []byte {
+		return encRegex.ReplaceAllFunc(code, func(match []byte) []byte {
+			inner := string(match[4 : len(match)-1])
+			if IsEncryptedInner(inner) {
+				return match
+			}
+			ct, err := enc.EncryptValue([]byte(inner))
+			if err != nil {
+				lastErr = err
+				return match
+			}
+			return []byte("ENC[" + ct + "]")
+		})
 	})
 	return result, lastErr
+}
+
+// walkOutsideComments rewrites only the non-comment portion of each line and
+// leaves comment text byte-for-byte intact. A '#' starts a comment when it
+// sits at the start of a line or after whitespace, AND is not itself inside
+// an ENC[...] marker — so values that legitimately contain '#' or '... # ...'
+// round-trip unmodified.
+func walkOutsideComments(content []byte, process func(code []byte) []byte) []byte {
+	var out bytes.Buffer
+	out.Grow(len(content))
+	start := 0
+	for i := 0; i <= len(content); i++ {
+		if i < len(content) && content[i] != '\n' {
+			continue
+		}
+		line := content[start:i]
+		code, comment := splitLineComment(line)
+		out.Write(process(code))
+		out.Write(comment)
+		if i < len(content) {
+			out.WriteByte('\n')
+		}
+		start = i + 1
+	}
+	return out.Bytes()
+}
+
+// splitLineComment returns (code, comment) for a single line (no trailing
+// newline). The split point is the first '#' that begins a comment; if no
+// comment is present, comment is nil.
+func splitLineComment(line []byte) (code, comment []byte) {
+	encRanges := encRegex.FindAllIndex(line, -1)
+	inEnc := func(pos int) bool {
+		for _, r := range encRanges {
+			if pos < r[0] {
+				return false
+			}
+			if pos < r[1] {
+				return true
+			}
+		}
+		return false
+	}
+	for i, b := range line {
+		if b != '#' || inEnc(i) {
+			continue
+		}
+		if i == 0 || line[i-1] == ' ' || line[i-1] == '\t' {
+			return line[:i], line[i:]
+		}
+	}
+	return line, nil
 }
 
 // DecryptContent scans for ENC[vN:...] markers and rewrites each using dec.
 // If keepMarkers is true, the result wraps the plaintext back in ENC[...]; otherwise
 // the wrapper is stripped. Markers the decryptor doesn't recognize (ErrSkip) are left
-// untouched, which lets mixed v1/v2 files round-trip safely.
+// untouched, which lets mixed v1/v2 files round-trip safely. Markers inside comments
+// are also skipped — mirroring EncryptContent — so a ciphertext kept in a comment for
+// reference is never sent to the KMS and never leaked back into the comment text.
 func DecryptContent(ctx context.Context, content []byte, dec Decryptor, keepMarkers bool) ([]byte, error) {
 	var lastErr error
-	result := encRegex.ReplaceAllFunc(content, func(match []byte) []byte {
-		inner := string(match[4 : len(match)-1])
-		pt, err := dec.DecryptMarker(ctx, inner)
-		if errors.Is(err, ErrSkip) {
-			return match
-		}
-		if err != nil {
-			lastErr = err
-			return match
-		}
-		if keepMarkers {
-			return []byte(fmt.Sprintf("ENC[%s]", string(pt)))
-		}
-		return pt
+	result := walkOutsideComments(content, func(code []byte) []byte {
+		return encRegex.ReplaceAllFunc(code, func(match []byte) []byte {
+			inner := string(match[4 : len(match)-1])
+			pt, err := dec.DecryptMarker(ctx, inner)
+			if errors.Is(err, ErrSkip) {
+				return match
+			}
+			if err != nil {
+				lastErr = err
+				return match
+			}
+			if keepMarkers {
+				return []byte(fmt.Sprintf("ENC[%s]", string(pt)))
+			}
+			return pt
+		})
 	})
 	return result, lastErr
 }
