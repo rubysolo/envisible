@@ -66,6 +66,21 @@ envisible run -e .env -- npm start
 
 *Note: For non-environment variable use cases (like config files), you can decrypt to a temporary file or use the `decrypt` command.*
 
+### A note on output streams
+
+`decrypt` writes the file contents (or a decrypted value) to **stdout**, so command substitution and pipes just work — no flags needed:
+
+```bash
+export DB_PASSWORD=$(envisible decrypt --strip secrets.env)
+envisible decrypt config.yaml | jq '.database'
+```
+
+All informational output (`Loading environment…`, `Starting:`, KMS summaries, etc.) goes to **stderr**, alongside errors. If you want to silence the chatter — for cleaner CI logs or interactive sessions — pass `--quiet` (or `-q`); it's a global flag and works on every subcommand:
+
+```bash
+envisible -q run -- ./deploy.sh   # no banner on stderr either
+```
+
 ### 5. Editing Secrets
 To edit secrets without manually decrypting and re-encrypting:
 

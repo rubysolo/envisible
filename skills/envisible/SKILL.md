@@ -239,6 +239,8 @@ The app reads these directly — `envisible run` only injects env vars, so emit 
 - **Build-time** (immutable artifacts): decrypt during the build into the image. Acceptable only if the image itself is treated as a secret (private registry, restricted pulls).
 - **In-process** (preferred for libraries): shell out to `envisible decrypt --strip` once at startup and parse the result, instead of teaching every config-loader about `ENC[...]`.
 
+Envisible writes decrypted content to stdout and all informational banners (`ℹ Loading…`, `✔ Starting…`, KMS summaries) to stderr, so `VAR=$(envisible decrypt --strip f)` and `envisible decrypt … | jq` are clean by default. Pass `-q` only when you also want to silence the stderr chatter (cleaner CI logs, quieter interactive sessions); it's a global flag that works on every subcommand.
+
 ### Dockerfile
 Don't bake `envisible.key` into the image layers. Either:
 - Mount it at runtime (Compose / Kubernetes secret / ECS task secret).
@@ -339,6 +341,7 @@ Add a short section to the project README (or a `SECRETS.md`) covering:
 - **GCP local auth confusion**: `gcloud auth login` and ADC are not the same. If local KMS calls fail, run `gcloud auth application-default login` and retry.
 - **KMS mode without committing `envisible.pub`.** Decryption fails with no obvious error — the resource pointer lives in that file. Commit it.
 - **Mixing v1 and v2 in the same file** works during migration (envisible builds a composite decryptor when both `envisible.key` and a v2-flagged `envisible.pub` exist), but don't leave it that way long-term. Pick a mode and re-encrypt.
+- **Banner mixed with the child's stderr under `envisible run`.** The banner goes to stderr, which is the right place — but if the child also writes structured stderr (e.g., JSON logs another tool parses), the banner will interleave. Pass `-q` to suppress it in that case. (Stdout is clean by default; capturing or piping decrypted values needs no flag.)
 
 ---
 
@@ -354,6 +357,7 @@ Add a short section to the project README (or a `SECRETS.md`) covering:
 | Encrypt in place | `envisible encrypt -i <file>` |
 | Decrypt to stdout | `envisible decrypt <file>` |
 | Decrypt to stdout, no markers | `envisible decrypt --strip <file>` |
+| Silence informational banner on stderr | `envisible -q <subcommand> ...` |
 | Edit in `$EDITOR` (decrypt → edit → encrypt) | `envisible edit <file>` |
 | Run with decrypted env injected | `envisible run -e <envfile> -- <cmd> <args...>` |
 | CI lint for unencrypted markers | `for f in <files>; do envisible check "$f"; done` |

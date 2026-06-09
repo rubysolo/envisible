@@ -13,6 +13,7 @@ import (
 
 	"github.com/rubysolo/envisible/pkg/crypto"
 	kmspkg "github.com/rubysolo/envisible/pkg/kms"
+	"github.com/rubysolo/envisible/pkg/ui"
 	"github.com/spf13/pflag"
 )
 
@@ -27,6 +28,7 @@ func resetRoot(out io.Writer) {
 	privKeyPath = "envisible.key"
 	pubKeyPath = "envisible.pub"
 	filePath = ".env"
+	ui.Quiet = false
 	// Reset the "changed" state of persistent flags
 	rootCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
 		f.Changed = false
@@ -395,6 +397,97 @@ func TestDecryptTextconv(t *testing.T) {
 
 	if b.String() != content {
 		t.Errorf("expected original content, got %q", b.String())
+	}
+}
+
+// setupRunFixture builds a tmp dir with keys and an encrypted .env containing
+// MY_VAR=ENC[secret-value]. Returns the dir and a cleanup func.
+func setupRunFixture(t *testing.T) func() {
+	t.Helper()
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"keygen"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	os.WriteFile(".env", []byte("MY_VAR=ENC[secret-value]"), 0644)
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", ".env"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	return func() { os.Chdir(oldWd) }
+}
+
+// captureStdStreams swaps os.Stdout / os.Stderr for pipes, runs fn, and returns
+// what was written to each. The cobra writer (rootCmd.SetOut/SetErr via
+// resetRoot) is independent of these — anything written via ui.* goes through
+// os.Stderr; child-process output set in runCmd goes through cobra's writer.
+func captureStdStreams(t *testing.T, fn func()) (stdout, stderr string) {
+	t.Helper()
+	rOut, wOut, _ := os.Pipe()
+	rErr, wErr, _ := os.Pipe()
+	origOut, origErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = wOut, wErr
+
+	fn()
+
+	wOut.Close()
+	wErr.Close()
+	os.Stdout, os.Stderr = origOut, origErr
+	outBytes, _ := io.ReadAll(rOut)
+	errBytes, _ := io.ReadAll(rErr)
+	return string(outBytes), string(errBytes)
+}
+
+func TestBannerGoesToStderrNotStdout(t *testing.T) {
+	defer setupRunFixture(t)()
+
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"run", "--", "env"})
+
+	var runErr error
+	stdout, stderr := captureStdStreams(t, func() {
+		runErr = rootCmd.Execute()
+	})
+	if runErr != nil {
+		t.Logf("run failed (maybe env missing?): %v", runErr)
+		return
+	}
+
+	if contains(stdout, "Loading environment") || contains(stdout, "Starting:") {
+		t.Errorf("banner text leaked onto stdout:\n%s", stdout)
+	}
+	if !contains(stderr, "Loading environment") || !contains(stderr, "Starting:") {
+		t.Errorf("banner missing from stderr:\n%s", stderr)
+	}
+}
+
+func TestQuietFlagSuppressesBanner(t *testing.T) {
+	defer setupRunFixture(t)()
+
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"-q", "run", "--", "env"})
+
+	var runErr error
+	_, stderr := captureStdStreams(t, func() {
+		runErr = rootCmd.Execute()
+	})
+	if runErr != nil {
+		t.Logf("run failed (maybe env missing?): %v", runErr)
+		return
+	}
+
+	if contains(stderr, "Loading environment") || contains(stderr, "Starting:") {
+		t.Errorf("banner text was not suppressed by --quiet:\n%s", stderr)
+	}
+	if !contains(b.String(), "MY_VAR=secret-value") {
+		t.Errorf("env value missing from child output:\n%s", b.String())
 	}
 }
 

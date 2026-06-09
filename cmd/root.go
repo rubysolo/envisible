@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 
+	"github.com/rubysolo/envisible/pkg/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +29,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&privKeyPath, "key", "k", os.Getenv("ENVISIBLE_KEY_PATH"), "path to private key file (default: envisible.key)")
 	rootCmd.PersistentFlags().StringVarP(&pubKeyPath, "pub", "p", os.Getenv("ENVISIBLE_PUB_PATH"), "path to public key file (default: envisible.pub)")
 	rootCmd.PersistentFlags().StringVarP(&filePath, "file", "f", os.Getenv("ENVISIBLE_FILE"), "path to env file (default: .env)")
+	rootCmd.PersistentFlags().BoolVarP(&ui.Quiet, "quiet", "q", false, "suppress informational output")
 
 	// Set defaults if not provided
 	if privKeyPath == "" {

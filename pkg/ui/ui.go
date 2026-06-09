@@ -7,6 +7,13 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Quiet suppresses informational output (Success, Info, Warn, KV, Headline).
+// Errors are always shown. Set via the --quiet/-q root flag.
+//
+// Informational output goes to stderr so that stdout remains a clean data
+// channel for piping and command substitution.
+var Quiet bool
+
 var (
 	// Colors
 	green  = lipgloss.Color("2")
@@ -32,7 +39,10 @@ var (
 
 // Success prints a success message with a checkmark
 func Success(msg string, args ...interface{}) {
-	fmt.Printf("%s %s\n", checkMark, fmt.Sprintf(msg, args...))
+	if Quiet {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "%s %s\n", checkMark, fmt.Sprintf(msg, args...))
 }
 
 // Error prints an error message with a cross mark
@@ -42,21 +52,33 @@ func Error(msg string, args ...interface{}) {
 
 // Info prints an informational message
 func Info(msg string, args ...interface{}) {
-	fmt.Printf("%s %s\n", infoIcon, fmt.Sprintf(msg, args...))
+	if Quiet {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "%s %s\n", infoIcon, fmt.Sprintf(msg, args...))
 }
 
 // Warn prints a warning message
 func Warn(msg string, args ...interface{}) {
-	fmt.Printf("%s %s\n", warnIcon, warnStyle.Render(fmt.Sprintf(msg, args...)))
+	if Quiet {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "%s %s\n", warnIcon, warnStyle.Render(fmt.Sprintf(msg, args...)))
 }
 
 // KV prints a key-value pair with consistent styling
 func KV(key, value string) {
-	fmt.Printf("  %s %s\n", labelStyle.Render(key+":"), valueStyle.Render(value))
+	if Quiet {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "  %s %s\n", labelStyle.Render(key+":"), valueStyle.Render(value))
 }
 
 // Headline prints a bold headline
 func Headline(msg string) {
+	if Quiet {
+		return
+	}
 	style := lipgloss.NewStyle().Bold(true).Underline(true).MarginBottom(1)
-	fmt.Println(style.Render(msg))
+	fmt.Fprintln(os.Stderr, style.Render(msg))
 }
