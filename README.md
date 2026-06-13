@@ -37,6 +37,27 @@ Then just ask: *"set up envisible to encrypt the secrets in this repo"* and the 
 
 **Other agents (Cursor, Codex, Aider, Zed, …)** — the skill is a plain Markdown file at [`skills/envisible/SKILL.md`](skills/envisible/SKILL.md). Point your agent at it, or copy it into your agent's rules/skills directory. This repo also includes an [`AGENTS.md`](AGENTS.md) describing the project for any agent that lands here.
 
+## How it compares
+
+Plenty of good tools encrypt secrets for version control. Envisible's particular niche is **value-level markers in any text file**: you wrap a single value (or even a substring of one) in `ENC[...]`, and only that value becomes ciphertext. Everything else — keys, structure, comments, the rest of a connection string — stays plaintext, so diffs and code review stay readable and there's no extra metadata block in your files.
+
+| Tool | Granularity | Works in | Keys | Diff stays readable? |
+| --- | --- | --- | --- | --- |
+| **Envisible** | Per-value `ENC[...]`, including partial substrings | any text file (YAML/JSON/TOML/.env/INI/…) | local NaCl keypair, or GCP/AWS/Azure KMS (private key stays in the cloud) | Yes — only the marked value is ciphertext |
+| [SOPS](https://github.com/getsops/sops) | Per-value (whole file, or keys matching `encrypted_regex`) | structured formats; adds a `sops` metadata block | age, PGP, AWS/GCP/Azure KMS, HashiCorp Vault | Mostly — values encrypt, plus an appended MAC block |
+| [git-crypt](https://github.com/AGWA/git-crypt) | Whole file | any file (via `.gitattributes`) | GPG or a symmetric key | No — the file is an opaque blob in git |
+| [dotenvx](https://github.com/dotenvx/dotenvx) | Per-value | `.env` files | ECIES keypair (private key in `.env.keys`) | Yes, within `.env` |
+| [Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets) | Whole Secret | Kubernetes `Secret` manifests | in-cluster controller key | N/A (Kubernetes CRD) |
+
+**Reach for something else when:**
+
+- You want **age or PGP keys, HashiCorp Vault, or a mature GitOps/Flux workflow** → SOPS is the deeper, more battle-tested ecosystem.
+- You want **whole files encrypted transparently** with no change to how your app reads them → git-crypt.
+- Your secrets are **Kubernetes `Secret`s** and you want an in-cluster operator to do the decryption → Sealed Secrets.
+- You live **entirely in `.env` files** and want that workflow polished end to end → dotenvx.
+
+Envisible is the right fit when your secrets don't map one-to-one with key names (e.g. encrypt just the password in a database connection string), you want diffs and reviews to stay legible, or you'd like to start with zero infrastructure (a local keypair) and graduate to managed cloud keys later **without changing the file format**. It also ships a SKILL.md, so a coding agent can handle the setup for you.
+
 ## Quick Start
 
 ### 1. Generate Keys
