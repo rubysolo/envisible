@@ -2,6 +2,8 @@
 
 **Envisible** is a CLI tool to safely manage encrypted secrets within your configuration files (YAML, JSON, TOML, .env, etc.) using explicit `ENC[...]` markers.
 
+Your secrets normally live somewhere your config doesn't: a separate secret store, a `.env` that's gitignored and passed around by hand, a wiki page that drifts out of date. Envisible keeps the secret *next to the setting it belongs to* and encrypts only that value, so the file stays safe to commit. That means your configuration is versioned alongside your code — every change to a secret shows up in `git history`, code review, and rollbacks like any other line. Deploys get simpler too: there's one source of truth in the repo and nothing to sync at release time, since values are decrypted on the fly at runtime (injected into the environment with `envisible run`, or emitted to stdout for build pipelines). Start with a local keypair and no infrastructure; move to cloud KMS when you want managed keys and audit logs — the file format doesn't change.
+
 Two key-management modes are supported:
 
 - **Local keypair** (default) — a NaCl Box keypair (Curve25519 + XSalsa20-Poly1305) generated with `envisible keygen`. Simple, no network, no cost. The private key file (`envisible.key`) must be kept off-repo and provisioned to anything that needs to decrypt.
