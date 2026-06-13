@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin.json",
+  "name": "envisible",
+  "description": "Manage encrypted secrets inline in config and env files with ENC[...] markers. Bundles a skill that teaches the agent to set up envisible end-to-end: discover plaintext secrets, pick a key mode (local NaCl keypair or GCP/AWS/Azure KMS), encrypt, and wire decryption into the runtime, CI, and git.",
+  "author": {
+    "name": "Solomon White"
+  },
+  "homepage": "https://github.com/rubysolo/envisible",
+  "repository": "https://github.com/rubysolo/envisible",
+  "license": "MIT",
+  "keywords": [
+    "secrets",
+    "secrets-management",
+    "encryption",
+    "kms",
+    "dotenv",
+    "configuration",
+    "devsecops"
+  ]
+}

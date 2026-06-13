@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "rubysolo-tools",
+  "owner": {
+    "name": "Solomon White"
+  },
+  "description": "Developer tools by rubysolo. Includes envisible, a CLI for managing encrypted secrets inline in config and env files.",
+  "plugins": [
+    {
+      "name": "envisible",
+      "source": "./",
+      "description": "Encrypt secrets inline in config and env files with ENC[...] markers (local NaCl keypair or GCP/AWS/Azure KMS). Bundles a setup skill for coding agents.",
+      "homepage": "https://github.com/rubysolo/envisible",
+      "repository": "https://github.com/rubysolo/envisible",
+      "license": "MIT",
+      "category": "security",
+      "keywords": [
+        "secrets",
+        "secrets-management",
+        "encryption",
+        "kms",
+        "dotenv",
+        "devsecops"
+      ]
+    }
+  ]
+}

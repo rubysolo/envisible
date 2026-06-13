@@ -20,6 +20,21 @@ brew tap rubysolo/tools
 brew install envisible
 ```
 
+## Use with AI coding agents
+
+Envisible ships with a setup skill so coding agents can wire encrypted secrets into a project for you — discovering plaintext secrets, choosing a key mode (local keypair or cloud KMS), encrypting, and wiring decryption into the runtime, CI, and git.
+
+**Claude Code** — install the plugin (bundles the skill):
+
+```text
+/plugin marketplace add rubysolo/envisible
+/plugin install envisible@rubysolo-tools
+```
+
+Then just ask: *"set up envisible to encrypt the secrets in this repo"* and the agent follows the skill end-to-end.
+
+**Other agents (Cursor, Codex, Aider, Zed, …)** — the skill is a plain Markdown file at [`skills/envisible/SKILL.md`](skills/envisible/SKILL.md). Point your agent at it, or copy it into your agent's rules/skills directory. This repo also includes an [`AGENTS.md`](AGENTS.md) describing the project for any agent that lands here.
+
 ## Quick Start
 
 ### 1. Generate Keys
