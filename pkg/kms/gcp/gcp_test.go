@@ -99,6 +99,58 @@ func TestInitRegistersGCP(t *testing.T) {
 	}
 }
 
+// swapKMSClient replaces the package-level read-path client constructor with fn
+// and returns a restore func suitable for t.Cleanup.
+func swapKMSClient(fn func(context.Context) (kmsClient, error)) func() {
+	prev := newKMSClient
+	newKMSClient = fn
+	return func() { newKMSClient = prev }
+}
+
+func TestNewUnwrapperThroughInjectedClient(t *testing.T) {
+	_, client := newFakeClient(t)
+	t.Cleanup(swapKMSClient(func(context.Context) (kmsClient, error) { return client, nil }))
+
+	u, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{Resource: "projects/p/.../cryptoKeyVersions/1"})
+	if err != nil {
+		t.Fatalf("newUnwrapper: %v", err)
+	}
+	if u == nil {
+		t.Fatal("newUnwrapper returned a nil unwrapper")
+	}
+}
+
+func TestNewUnwrapperClientError(t *testing.T) {
+	t.Cleanup(swapKMSClient(func(context.Context) (kmsClient, error) {
+		return nil, errors.New("ADC not found")
+	}))
+	if _, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{Resource: "x"}); err == nil {
+		t.Error("expected client-construction error")
+	}
+}
+
+func TestFetchPublicKeyThroughInjectedClient(t *testing.T) {
+	priv, client := newFakeClient(t)
+	t.Cleanup(swapKMSClient(func(context.Context) (kmsClient, error) { return client, nil }))
+
+	info, err := fetchPublicKey(context.Background(), "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1")
+	if err != nil {
+		t.Fatalf("fetchPublicKey: %v", err)
+	}
+	if info.PubKey.N.Cmp(priv.PublicKey.N) != 0 {
+		t.Error("returned public key does not match the fake's key")
+	}
+}
+
+func TestFetchPublicKeyClientError(t *testing.T) {
+	t.Cleanup(swapKMSClient(func(context.Context) (kmsClient, error) {
+		return nil, errors.New("ADC not found")
+	}))
+	if _, err := fetchPublicKey(context.Background(), "x"); err == nil {
+		t.Error("expected client-construction error")
+	}
+}
+
 func TestFetchPublicKeyHappyPath(t *testing.T) {
 	priv, client := newFakeClient(t)
 

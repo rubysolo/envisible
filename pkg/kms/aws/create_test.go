@@ -111,3 +111,38 @@ func TestCreateKeyPropagatesAPIError(t *testing.T) {
 		t.Errorf("expected API error, got %v", err)
 	}
 }
+
+func TestCreateKeyThroughInjectedClient(t *testing.T) {
+	arn := "arn:aws:kms:us-west-2:123456789012:key/injected"
+	api := newFakeCreator(arn)
+	var gotRegion string
+	prev := newCreatorClient
+	newCreatorClient = func(_ context.Context, region string) (creatorAPI, error) {
+		gotRegion = region
+		return api, nil
+	}
+	t.Cleanup(func() { newCreatorClient = prev })
+
+	got, err := CreateKey(context.Background(), CreateKeyParams{Region: "us-west-2", Alias: "my-app"})
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	if got != arn {
+		t.Errorf("CreateKey returned %q, want %q", got, arn)
+	}
+	if gotRegion != "us-west-2" {
+		t.Errorf("region passed to client constructor = %q, want us-west-2", gotRegion)
+	}
+}
+
+func TestCreateKeyClientConstructionError(t *testing.T) {
+	prev := newCreatorClient
+	newCreatorClient = func(context.Context, string) (creatorAPI, error) {
+		return nil, errors.New("no credentials")
+	}
+	t.Cleanup(func() { newCreatorClient = prev })
+
+	if _, err := CreateKey(context.Background(), CreateKeyParams{}); err == nil {
+		t.Error("expected client-construction error")
+	}
+}

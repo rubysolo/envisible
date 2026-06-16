@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys"
 )
 
@@ -19,6 +20,13 @@ type CreateKeyParams struct {
 // creatorClient is the slice of *azkeys.Client that CreateKey uses.
 type creatorClient interface {
 	CreateKey(ctx context.Context, name string, parameters azkeys.CreateKeyParameters, options *azkeys.CreateKeyOptions) (azkeys.CreateKeyResponse, error)
+}
+
+// newCreatorClient builds the SDK client used to provision keys. As with
+// newKeyVaultClient, it's a package var so tests can inject a fake and cover
+// CreateKey's vault-URL handling without a live vault.
+var newCreatorClient = func(vaultURL string, cred azcore.TokenCredential) (creatorClient, error) {
+	return azkeys.NewClient(vaultURL, cred, nil)
 }
 
 // CreateKey provisions a new RSA-2048 key in the specified Key Vault and returns
@@ -36,7 +44,7 @@ func CreateKey(ctx context.Context, p CreateKeyParams) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	client, err := azkeys.NewClient(vaultURL, cred, nil)
+	client, err := newCreatorClient(vaultURL, cred)
 	if err != nil {
 		return "", fmt.Errorf("azure kms: create keyvault client: %w", err)
 	}

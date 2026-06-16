@@ -39,8 +39,15 @@ var (
 // CreateKey provisions an asymmetric ASYMMETRIC_DECRYPT key with algorithm
 // RSA_DECRYPT_OAEP_2048_SHA256 and returns the resource string of its first
 // CryptoKeyVersion (which envisible.pub then pins to).
+// newCreatorClient builds the provisioning-path SDK client. As with newKMSClient,
+// it's a package var so tests can inject a fake and cover CreateKey without
+// Application Default Credentials.
+var newCreatorClient = func(ctx context.Context) (creatorClient, error) {
+	return cloudkms.NewKeyManagementClient(ctx)
+}
+
 func CreateKey(ctx context.Context, p CreateKeyParams) (string, error) {
-	client, err := cloudkms.NewKeyManagementClient(ctx)
+	client, err := newCreatorClient(ctx)
 	if err != nil {
 		return "", fmt.Errorf("gcp kms: create client: %w", err)
 	}

@@ -39,8 +39,15 @@ type kmsClient interface {
 // network or SDK silently corrupting a payload.
 var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
 
+// newKMSClient builds the read-path SDK client. It's a package var rather than a
+// direct call so tests can inject a fake and exercise newUnwrapper/fetchPublicKey
+// end-to-end without Application Default Credentials.
+var newKMSClient = func(ctx context.Context) (kmsClient, error) {
+	return cloudkms.NewKeyManagementClient(ctx)
+}
+
 func newUnwrapper(ctx context.Context, info *kms.PublicKeyInfo) (kms.Unwrapper, error) {
-	client, err := cloudkms.NewKeyManagementClient(ctx)
+	client, err := newKMSClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gcp kms: create client: %w", err)
 	}
@@ -75,7 +82,7 @@ func (u *unwrapper) Unwrap(ctx context.Context, wrapped []byte) ([]byte, error) 
 }
 
 func fetchPublicKey(ctx context.Context, resource string) (*kms.PublicKeyInfo, error) {
-	client, err := cloudkms.NewKeyManagementClient(ctx)
+	client, err := newKMSClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gcp kms: create client: %w", err)
 	}

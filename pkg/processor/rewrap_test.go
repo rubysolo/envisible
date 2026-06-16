@@ -113,4 +113,3 @@ func TestRewrapContentLeavesNonV2Untouched(t *testing.T) {
 		t.Errorf("file with no v2 markers was modified")
 	}
 }
-

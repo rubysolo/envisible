@@ -10,10 +10,19 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys"
 
 	"github.com/rubysolo/envisible/pkg/kms"
 )
+
+// swapKeyVaultClient replaces the package-level keyvault client constructor with
+// fn and returns a restore func suitable for t.Cleanup.
+func swapKeyVaultClient(fn func(string, azcore.TokenCredential) (kvClient, error)) func() {
+	prev := newKeyVaultClient
+	newKeyVaultClient = fn
+	return func() { newKeyVaultClient = prev }
+}
 
 // fakeKVClient stands in for *azkeys.Client. Decrypt uses a local RSA key so
 // envelope round-trips can be exercised offline. The last name/version/algorithm
@@ -90,12 +99,12 @@ func TestParseAzureResource(t *testing.T) {
 		wantVer   string
 		wantErr   bool
 	}{
-		"happy":            {"https://myvault.vault.azure.net/keys/mykey/abc123", "https://myvault.vault.azure.net", "mykey", "abc123", false},
-		"trailing_slash":   {"https://v.vault.azure.net/keys/k/v/", "https://v.vault.azure.net", "k", "v", false},
-		"http_not_https":   {"http://v.vault.azure.net/keys/k/v", "", "", "", true},
-		"missing_version":  {"https://v.vault.azure.net/keys/k", "", "", "", true},
-		"wrong_path_root":  {"https://v.vault.azure.net/secrets/k/v", "", "", "", true},
-		"empty":            {"", "", "", "", true},
+		"happy":           {"https://myvault.vault.azure.net/keys/mykey/abc123", "https://myvault.vault.azure.net", "mykey", "abc123", false},
+		"trailing_slash":  {"https://v.vault.azure.net/keys/k/v/", "https://v.vault.azure.net", "k", "v", false},
+		"http_not_https":  {"http://v.vault.azure.net/keys/k/v", "", "", "", true},
+		"missing_version": {"https://v.vault.azure.net/keys/k", "", "", "", true},
+		"wrong_path_root": {"https://v.vault.azure.net/secrets/k/v", "", "", "", true},
+		"empty":           {"", "", "", "", true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -209,5 +218,92 @@ func TestUnwrapperPropagatesAPIError(t *testing.T) {
 	_, err := u.Unwrap(context.Background(), []byte("anything"))
 	if err == nil || !strings.Contains(err.Error(), "KeyNotFound") {
 		t.Errorf("expected API error to surface, got %v", err)
+	}
+}
+
+func TestNewCredential(t *testing.T) {
+	// DefaultAzureCredential constructs without any network round-trip — it only
+	// reaches out when a token is first requested. So this exercises the wiring
+	// without depending on a live Azure environment.
+	cred, err := newCredential()
+	if err != nil {
+		t.Fatalf("newCredential: %v", err)
+	}
+	if cred == nil {
+		t.Fatal("newCredential returned a nil credential")
+	}
+}
+
+func TestNewUnwrapperRejectsBadResource(t *testing.T) {
+	_, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{Resource: "not-a-url"})
+	if err == nil || !strings.Contains(err.Error(), "azure") {
+		t.Errorf("expected resource parse error, got %v", err)
+	}
+}
+
+func TestNewUnwrapperBuildsClient(t *testing.T) {
+	// A valid resource must yield a usable unwrapper. Client construction is
+	// offline; the SDK only dials on the first Decrypt call, which we don't make.
+	u, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{
+		Resource: "https://myvault.vault.azure.net/keys/mykey/v1",
+	})
+	if err != nil {
+		t.Fatalf("newUnwrapper: %v", err)
+	}
+	if u == nil {
+		t.Fatal("newUnwrapper returned a nil unwrapper")
+	}
+}
+
+func TestFetchPublicKeyRejectsBadResource(t *testing.T) {
+	if _, err := fetchPublicKey(context.Background(), "not-a-url"); err == nil {
+		t.Error("expected resource parse error for malformed resource")
+	}
+}
+
+func TestFetchPublicKeyThroughInjectedClient(t *testing.T) {
+	priv, api := newFakeClient(t)
+	t.Cleanup(swapKeyVaultClient(func(string, azcore.TokenCredential) (kvClient, error) {
+		return api, nil
+	}))
+
+	resource := "https://myvault.vault.azure.net/keys/mykey/v1"
+	info, err := fetchPublicKey(context.Background(), resource)
+	if err != nil {
+		t.Fatalf("fetchPublicKey: %v", err)
+	}
+	if info.PubKey.N.Cmp(priv.PublicKey.N) != 0 {
+		t.Error("returned public key does not match the fake's key")
+	}
+}
+
+func TestFetchPublicKeyClientConstructionError(t *testing.T) {
+	t.Cleanup(swapKeyVaultClient(func(string, azcore.TokenCredential) (kvClient, error) {
+		return nil, errors.New("bad vault URL")
+	}))
+	_, err := fetchPublicKey(context.Background(), "https://v.vault.azure.net/keys/k/v")
+	if err == nil || !strings.Contains(err.Error(), "create keyvault client") {
+		t.Errorf("expected client-construction error, got %v", err)
+	}
+}
+
+func TestJWKToRSAPublicKeyErrors(t *testing.T) {
+	rsaKty := azkeys.KeyTypeRSA
+	ecKty := azkeys.KeyTypeEC
+	cases := map[string]struct {
+		jwk  *azkeys.JSONWebKey
+		want string
+	}{
+		"nil_kty":   {&azkeys.JSONWebKey{N: []byte{1, 0, 0}, E: []byte{1, 0, 1}}, "no Kty"},
+		"not_rsa":   {&azkeys.JSONWebKey{Kty: &ecKty, N: []byte{1, 0, 0}, E: []byte{1, 0, 1}}, "not RSA"},
+		"missing_n": {&azkeys.JSONWebKey{Kty: &rsaKty, E: []byte{1, 0, 1}}, "missing RSA modulus"},
+		"zero_exp":  {&azkeys.JSONWebKey{Kty: &rsaKty, N: []byte{1, 0, 0}, E: []byte{0}}, "exponent is invalid"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := jwkToRSAPublicKey(tc.jwk); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("jwkToRSAPublicKey: got %v, want error containing %q", err, tc.want)
+			}
+		})
 	}
 }

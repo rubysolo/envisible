@@ -28,16 +28,27 @@ type creatorAPI interface {
 
 // CreateKey provisions an asymmetric RSA-2048 KMS key with KeyUsage=ENCRYPT_DECRYPT
 // and returns its ARN. If Alias is set, a matching `alias/<name>` is also created.
-func CreateKey(ctx context.Context, p CreateKeyParams) (string, error) {
+// newCreatorClient builds the provisioning-path SDK client. As with
+// newKMSClient, it's a package var so tests can inject a fake and cover
+// CreateKey's region handling without live AWS credentials.
+var newCreatorClient = func(ctx context.Context, region string) (creatorAPI, error) {
 	opts := []func(*config.LoadOptions) error{}
-	if p.Region != "" {
-		opts = append(opts, config.WithRegion(p.Region))
+	if region != "" {
+		opts = append(opts, config.WithRegion(region))
 	}
 	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
-		return "", fmt.Errorf("aws kms: load default config: %w", err)
+		return nil, fmt.Errorf("aws kms: load default config: %w", err)
 	}
-	return createKeyWithClient(ctx, awskms.NewFromConfig(cfg), p)
+	return awskms.NewFromConfig(cfg), nil
+}
+
+func CreateKey(ctx context.Context, p CreateKeyParams) (string, error) {
+	client, err := newCreatorClient(ctx, p.Region)
+	if err != nil {
+		return "", err
+	}
+	return createKeyWithClient(ctx, client, p)
 }
 
 func createKeyWithClient(ctx context.Context, client creatorAPI, p CreateKeyParams) (string, error) {

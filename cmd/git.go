@@ -25,68 +25,68 @@ This command executes:
   git config diff.envisible.textconv "envisible decrypt --textconv"
   git config diff.envisible.cachetextconv true
 `,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Check if we are in a git repo
-			if _, err := os.Stat(".git"); os.IsNotExist(err) {
-				return fmt.Errorf("not a git repository (no .git directory found)")
-			}
-	
-			// Configure textconv
-			fmt.Fprintln(cmd.OutOrStdout(), "Configuring git diff driver...")
-	
-			if err := runGit("config", "diff.envisible.textconv", "envisible decrypt --textconv"); err != nil {
-				return fmt.Errorf("failed to set diff.envisible.textconv: %w", err)
-			}
-	
-			if err := runGit("config", "diff.envisible.cachetextconv", "true"); err != nil {
-				return fmt.Errorf("failed to set diff.envisible.cachetextconv: %w", err)
-			}
-	
-			fmt.Fprintln(cmd.OutOrStdout(), "Git configuration updated.")
-			fmt.Fprintln(cmd.OutOrStdout(), "\nTo enable this for your files, add the following to your .gitattributes file:")
-			fmt.Fprintln(cmd.OutOrStdout(), "\n  *.yaml diff=envisible")
-			fmt.Fprintln(cmd.OutOrStdout(), "  *.json diff=envisible")
-			fmt.Fprintln(cmd.OutOrStdout(), "  .env diff=envisible")
-	
-			// Optional: Check if .gitattributes exists and suggest checking it
-			if _, err := os.Stat(".gitattributes"); err == nil {
-				fmt.Fprintln(cmd.OutOrStdout(), "\n(Found existing .gitattributes)")
-			} else {
-				fmt.Fprintln(cmd.OutOrStdout(), "\n(.gitattributes does not exist yet)")
-			}
-	
-			return nil
-		},
-	}
-	
-	func runGit(args ...string) error {
-		wd, err := os.Getwd()
-		if err != nil {
-			return err
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// Check if we are in a git repo
+		if _, err := os.Stat(".git"); os.IsNotExist(err) {
+			return fmt.Errorf("not a git repository (no .git directory found)")
 		}
-		c := exec.Command("git", args...)
-		c.Dir = wd
-		return c.Run()
+
+		// Configure textconv
+		fmt.Fprintln(cmd.OutOrStdout(), "Configuring git diff driver...")
+
+		if err := runGit("config", "diff.envisible.textconv", "envisible decrypt --textconv"); err != nil {
+			return fmt.Errorf("failed to set diff.envisible.textconv: %w", err)
+		}
+
+		if err := runGit("config", "diff.envisible.cachetextconv", "true"); err != nil {
+			return fmt.Errorf("failed to set diff.envisible.cachetextconv: %w", err)
+		}
+
+		fmt.Fprintln(cmd.OutOrStdout(), "Git configuration updated.")
+		fmt.Fprintln(cmd.OutOrStdout(), "\nTo enable this for your files, add the following to your .gitattributes file:")
+		fmt.Fprintln(cmd.OutOrStdout(), "\n  *.yaml diff=envisible")
+		fmt.Fprintln(cmd.OutOrStdout(), "  *.json diff=envisible")
+		fmt.Fprintln(cmd.OutOrStdout(), "  .env diff=envisible")
+
+		// Optional: Check if .gitattributes exists and suggest checking it
+		if _, err := os.Stat(".gitattributes"); err == nil {
+			fmt.Fprintln(cmd.OutOrStdout(), "\n(Found existing .gitattributes)")
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "\n(.gitattributes does not exist yet)")
+		}
+
+		return nil
+	},
+}
+
+func runGit(args ...string) error {
+	wd, err := os.Getwd()
+	if err != nil {
+		return err
 	}
-	
-	var gitInstallHookCmd = &cobra.Command{
-		Use:   "install-hook",
-		Short: "Install pre-commit hook",
-		Long:  `Installs a git pre-commit hook that runs 'envisible check' to prevent committing unencrypted secrets.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if _, err := os.Stat(".git"); os.IsNotExist(err) {
-				return fmt.Errorf("not a git repository")
-			}
-	
-			hookDir := filepath.Join(".git", "hooks")
-			if err := os.MkdirAll(hookDir, 0755); err != nil {
-				return fmt.Errorf("failed to create hooks directory: %w", err)
-			}
-	
-			hookPath := filepath.Join(hookDir, "pre-commit")
-	
-			// Simple hook script
-			script := `#!/bin/sh
+	c := exec.Command("git", args...)
+	c.Dir = wd
+	return c.Run()
+}
+
+var gitInstallHookCmd = &cobra.Command{
+	Use:   "install-hook",
+	Short: "Install pre-commit hook",
+	Long:  `Installs a git pre-commit hook that runs 'envisible check' to prevent committing unencrypted secrets.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := os.Stat(".git"); os.IsNotExist(err) {
+			return fmt.Errorf("not a git repository")
+		}
+
+		hookDir := filepath.Join(".git", "hooks")
+		if err := os.MkdirAll(hookDir, 0755); err != nil {
+			return fmt.Errorf("failed to create hooks directory: %w", err)
+		}
+
+		hookPath := filepath.Join(hookDir, "pre-commit")
+
+		// Simple hook script
+		script := `#!/bin/sh
 	# envisible pre-commit hook
 	# Checks for unencrypted ENC[...] markers
 	
@@ -131,19 +131,20 @@ This command executes:
 	
 	exit 0
 	`
-			// Check if hook already exists
-			if _, err := os.Stat(hookPath); err == nil {
-				return fmt.Errorf("pre-commit hook already exists at %s. Please edit manually", hookPath)
-			}
-	
-			if err := os.WriteFile(hookPath, []byte(script), 0755); err != nil {
-				return fmt.Errorf("failed to write pre-commit hook: %w", err)
-			}
-	
-			fmt.Fprintf(cmd.OutOrStdout(), "Pre-commit hook installed to %s\n", hookPath)
-			return nil
-		},
-	}
+		// Check if hook already exists
+		if _, err := os.Stat(hookPath); err == nil {
+			return fmt.Errorf("pre-commit hook already exists at %s. Please edit manually", hookPath)
+		}
+
+		if err := os.WriteFile(hookPath, []byte(script), 0755); err != nil {
+			return fmt.Errorf("failed to write pre-commit hook: %w", err)
+		}
+
+		fmt.Fprintf(cmd.OutOrStdout(), "Pre-commit hook installed to %s\n", hookPath)
+		return nil
+	},
+}
+
 func init() {
 	gitCmd.AddCommand(gitSetupCmd)
 	gitCmd.AddCommand(gitInstallHookCmd)

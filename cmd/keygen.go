@@ -37,4 +37,3 @@ var keygenCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(keygenCmd)
 }
-

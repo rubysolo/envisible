@@ -187,3 +187,68 @@ func TestUnwrapperPropagatesAPIError(t *testing.T) {
 		t.Errorf("expected API error to surface, got %v", err)
 	}
 }
+
+// swapKMSClient replaces the package-level read-path client constructor with fn
+// and returns a restore func suitable for t.Cleanup.
+func swapKMSClient(fn func(context.Context) (kmsAPI, error)) func() {
+	prev := newKMSClient
+	newKMSClient = fn
+	return func() { newKMSClient = prev }
+}
+
+func TestNewUnwrapperThroughInjectedClient(t *testing.T) {
+	_, api := newFakeAPI(t)
+	t.Cleanup(swapKMSClient(func(context.Context) (kmsAPI, error) { return api, nil }))
+
+	u, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{Resource: "arn:aws:kms:::key/x"})
+	if err != nil {
+		t.Fatalf("newUnwrapper: %v", err)
+	}
+	if u == nil {
+		t.Fatal("newUnwrapper returned a nil unwrapper")
+	}
+}
+
+func TestNewUnwrapperClientError(t *testing.T) {
+	t.Cleanup(swapKMSClient(func(context.Context) (kmsAPI, error) {
+		return nil, errors.New("no credentials")
+	}))
+	if _, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{Resource: "x"}); err == nil {
+		t.Error("expected client-construction error")
+	}
+}
+
+func TestFetchPublicKeyThroughInjectedClient(t *testing.T) {
+	priv, api := newFakeAPI(t)
+	t.Cleanup(swapKMSClient(func(context.Context) (kmsAPI, error) { return api, nil }))
+
+	resource := "arn:aws:kms:us-east-1:123456789012:key/abcd"
+	info, err := fetchPublicKey(context.Background(), resource)
+	if err != nil {
+		t.Fatalf("fetchPublicKey: %v", err)
+	}
+	if info.PubKey.N.Cmp(priv.PublicKey.N) != 0 {
+		t.Error("returned public key does not match the fake's key")
+	}
+}
+
+func TestFetchPublicKeyClientError(t *testing.T) {
+	t.Cleanup(swapKMSClient(func(context.Context) (kmsAPI, error) {
+		return nil, errors.New("no credentials")
+	}))
+	if _, err := fetchPublicKey(context.Background(), "x"); err == nil {
+		t.Error("expected client-construction error")
+	}
+}
+
+// The default client constructors build their SDK clients without any network
+// round-trip (the AWS SDK resolves credentials lazily, on first call). Exercising
+// them directly covers the real wiring rather than only the injected fakes.
+func TestDefaultClientConstructorsAreOffline(t *testing.T) {
+	if c, err := newKMSClient(context.Background()); err != nil || c == nil {
+		t.Fatalf("newKMSClient: client=%v err=%v", c, err)
+	}
+	if c, err := newCreatorClient(context.Background(), "us-east-1"); err != nil || c == nil {
+		t.Fatalf("newCreatorClient: client=%v err=%v", c, err)
+	}
+}

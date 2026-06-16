@@ -75,6 +75,13 @@ func newCredential() (azcore.TokenCredential, error) {
 	return cred, nil
 }
 
+// newKeyVaultClient builds the SDK client used for GetKey/Decrypt. It's a
+// package var rather than a direct call so tests can substitute a fake and
+// exercise newUnwrapper/fetchPublicKey end-to-end without a live vault.
+var newKeyVaultClient = func(vaultURL string, cred azcore.TokenCredential) (kvClient, error) {
+	return azkeys.NewClient(vaultURL, cred, nil)
+}
+
 func newUnwrapper(ctx context.Context, info *kms.PublicKeyInfo) (kms.Unwrapper, error) {
 	res, err := parseAzureResource(info.Resource)
 	if err != nil {
@@ -84,7 +91,7 @@ func newUnwrapper(ctx context.Context, info *kms.PublicKeyInfo) (kms.Unwrapper, 
 	if err != nil {
 		return nil, err
 	}
-	client, err := azkeys.NewClient(res.vaultURL, cred, nil)
+	client, err := newKeyVaultClient(res.vaultURL, cred)
 	if err != nil {
 		return nil, fmt.Errorf("azure: create keyvault client: %w", err)
 	}
@@ -121,7 +128,7 @@ func fetchPublicKey(ctx context.Context, resource string) (*kms.PublicKeyInfo, e
 	if err != nil {
 		return nil, err
 	}
-	client, err := azkeys.NewClient(res.vaultURL, cred, nil)
+	client, err := newKeyVaultClient(res.vaultURL, cred)
 	if err != nil {
 		return nil, fmt.Errorf("azure: create keyvault client: %w", err)
 	}

@@ -32,12 +32,23 @@ type kmsAPI interface {
 	GetPublicKey(ctx context.Context, params *awskms.GetPublicKeyInput, optFns ...func(*awskms.Options)) (*awskms.GetPublicKeyOutput, error)
 }
 
-func newUnwrapper(ctx context.Context, info *kms.PublicKeyInfo) (kms.Unwrapper, error) {
+// newKMSClient builds the read-path SDK client. It's a package var rather than
+// a direct call so tests can inject a fake and exercise newUnwrapper/fetchPublicKey
+// end-to-end without live AWS credentials.
+var newKMSClient = func(ctx context.Context) (kmsAPI, error) {
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("aws kms: load default config: %w", err)
 	}
-	return newUnwrapperWithClient(awskms.NewFromConfig(cfg), info.Resource), nil
+	return awskms.NewFromConfig(cfg), nil
+}
+
+func newUnwrapper(ctx context.Context, info *kms.PublicKeyInfo) (kms.Unwrapper, error) {
+	client, err := newKMSClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return newUnwrapperWithClient(client, info.Resource), nil
 }
 
 func newUnwrapperWithClient(client kmsAPI, resource string) *unwrapper {
@@ -64,11 +75,11 @@ func (u *unwrapper) Unwrap(ctx context.Context, wrapped []byte) ([]byte, error) 
 }
 
 func fetchPublicKey(ctx context.Context, resource string) (*kms.PublicKeyInfo, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+	client, err := newKMSClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("aws kms: load default config: %w", err)
+		return nil, err
 	}
-	return fetchPublicKeyWithClient(ctx, awskms.NewFromConfig(cfg), resource)
+	return fetchPublicKeyWithClient(ctx, client, resource)
 }
 
 func fetchPublicKeyWithClient(ctx context.Context, client kmsAPI, resource string) (*kms.PublicKeyInfo, error) {

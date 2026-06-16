@@ -2,10 +2,13 @@ package kms
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -167,12 +170,12 @@ func TestLoadPublicKeyRejectsBadInputs(t *testing.T) {
 	dir := t.TempDir()
 
 	cases := map[string]string{
-		"unknown_provider":  `{"version": 2, "provider": "icloud", "resource": "x", "algorithm": "RSA-OAEP-SHA256-2048", "public_key": ""}`,
-		"missing_resource":  `{"version": 2, "provider": "gcp", "resource": "", "algorithm": "RSA-OAEP-SHA256-2048", "public_key": ""}`,
-		"wrong_version":     `{"version": 9, "provider": "gcp", "resource": "x", "algorithm": "RSA-OAEP-SHA256-2048", "public_key": ""}`,
-		"bad_pem":           `{"version": 2, "provider": "gcp", "resource": "x", "algorithm": "RSA-OAEP-SHA256-2048", "public_key": "not-a-pem-block"}`,
-		"truncated_base64":  "this is not valid base64 of 32 bytes",
-		"empty_file":        "",
+		"unknown_provider": `{"version": 2, "provider": "icloud", "resource": "x", "algorithm": "RSA-OAEP-SHA256-2048", "public_key": ""}`,
+		"missing_resource": `{"version": 2, "provider": "gcp", "resource": "", "algorithm": "RSA-OAEP-SHA256-2048", "public_key": ""}`,
+		"wrong_version":    `{"version": 9, "provider": "gcp", "resource": "x", "algorithm": "RSA-OAEP-SHA256-2048", "public_key": ""}`,
+		"bad_pem":          `{"version": 2, "provider": "gcp", "resource": "x", "algorithm": "RSA-OAEP-SHA256-2048", "public_key": "not-a-pem-block"}`,
+		"truncated_base64": "this is not valid base64 of 32 bytes",
+		"empty_file":       "",
 	}
 
 	for name, content := range cases {
@@ -246,5 +249,107 @@ func TestOpenUnwrapperUnknownProvider(t *testing.T) {
 	_, err := OpenUnwrapper(context.Background(), info)
 	if err == nil {
 		t.Errorf("expected error for unregistered provider")
+	}
+}
+
+func TestBootstrapRegistry(t *testing.T) {
+	kind := ProviderKind("test-bootstrap")
+	if IsBootstrapRegistered(kind) {
+		t.Fatalf("kind %q unexpectedly registered before test", kind)
+	}
+
+	called := 0
+	RegisterBootstrap(kind, func(_ context.Context, resource string) (*PublicKeyInfo, error) {
+		called++
+		return &PublicKeyInfo{Kind: kind, Resource: resource}, nil
+	})
+	if !IsBootstrapRegistered(kind) {
+		t.Error("IsBootstrapRegistered returned false after RegisterBootstrap")
+	}
+
+	info, err := BootstrapPublicKey(context.Background(), kind, "the-resource")
+	if err != nil {
+		t.Fatalf("BootstrapPublicKey: %v", err)
+	}
+	if called != 1 || info.Resource != "the-resource" {
+		t.Errorf("bootstrap dispatch wrong: called=%d info=%+v", called, info)
+	}
+
+	if _, err := BootstrapPublicKey(context.Background(), ProviderKind("unregistered-bootstrap"), "x"); err == nil {
+		t.Error("expected error for unregistered bootstrap provider")
+	}
+}
+
+func TestIsUnwrapperRegistered(t *testing.T) {
+	kind := ProviderKind("test-isreg")
+	if IsUnwrapperRegistered(kind) {
+		t.Fatalf("kind %q unexpectedly registered before test", kind)
+	}
+	RegisterUnwrapper(kind, func(context.Context, *PublicKeyInfo) (Unwrapper, error) { return nil, nil })
+	if !IsUnwrapperRegistered(kind) {
+		t.Error("IsUnwrapperRegistered returned false after RegisterUnwrapper")
+	}
+}
+
+func TestReplaceUnwrapperAndBootstrap(t *testing.T) {
+	kind := ProviderKind("test-replace")
+
+	sentinel := func(context.Context, *PublicKeyInfo) (Unwrapper, error) {
+		return nil, errors.New("original")
+	}
+	RegisterUnwrapper(kind, sentinel)
+	prev := ReplaceUnwrapper(kind, func(context.Context, *PublicKeyInfo) (Unwrapper, error) {
+		return nil, errors.New("replacement")
+	})
+	if prev == nil {
+		t.Error("ReplaceUnwrapper did not return the prior factory")
+	}
+	if restored := ReplaceUnwrapper(kind, prev); restored == nil {
+		t.Error("restoring the prior factory should also return the replacement")
+	}
+
+	bSentinel := func(context.Context, string) (*PublicKeyInfo, error) {
+		return nil, errors.New("original")
+	}
+	RegisterBootstrap(kind, bSentinel)
+	bPrev := ReplaceBootstrap(kind, func(context.Context, string) (*PublicKeyInfo, error) {
+		return nil, errors.New("replacement")
+	})
+	if bPrev == nil {
+		t.Error("ReplaceBootstrap did not return the prior fetcher")
+	}
+	ReplaceBootstrap(kind, bPrev)
+}
+
+func TestWritePublicKeyRejectsInvalidAlgorithm(t *testing.T) {
+	priv := generateRSAKey(t, 2048)
+	path := filepath.Join(t.TempDir(), "envisible.pub")
+	err := WritePublicKey(path, &PublicKeyInfo{
+		Kind:     GCP,
+		Resource: "x",
+		Alg:      Algorithm("bogus-algorithm"),
+		PubKey:   &priv.PublicKey,
+	})
+	if err == nil {
+		t.Error("expected WritePublicKey to reject an invalid algorithm")
+	}
+}
+
+func TestParseRSAPublicKeyDERErrors(t *testing.T) {
+	if _, err := ParseRSAPublicKeyDER([]byte("not-valid-der")); err == nil {
+		t.Error("expected parse error for malformed DER")
+	}
+
+	// A well-formed PKIX key that isn't RSA must be rejected.
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatalf("MarshalPKIXPublicKey: %v", err)
+	}
+	if _, err := ParseRSAPublicKeyDER(der); err == nil {
+		t.Error("expected ParseRSAPublicKeyDER to reject a non-RSA key")
 	}
 }

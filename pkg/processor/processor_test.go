@@ -449,14 +449,14 @@ func TestStructureCheck(t *testing.T) {
 		size    int
 		wantErr bool
 	}{
-		"v1_ok":             {"v1:" + v1ct, 256, false},
-		"v2_ok":             {v2Inner, 256, false},
-		"unknown_prefix":    {"v9:abcdef", 256, true},
-		"no_prefix":         {"raw-secret", 256, true},
-		"v1_truncated":      {"v1:" + v1ct[:8], 256, true},
-		"v2_truncated":      {v2Inner[:10] + "==", 256, true},
-		"v1_bad_base64":     {"v1:not-base64!!!", 256, true},
-		"v2_bad_base64":     {"v2:!!!not-base64", 256, true},
+		"v1_ok":          {"v1:" + v1ct, 256, false},
+		"v2_ok":          {v2Inner, 256, false},
+		"unknown_prefix": {"v9:abcdef", 256, true},
+		"no_prefix":      {"raw-secret", 256, true},
+		"v1_truncated":   {"v1:" + v1ct[:8], 256, true},
+		"v2_truncated":   {v2Inner[:10] + "==", 256, true},
+		"v1_bad_base64":  {"v1:not-base64!!!", 256, true},
+		"v2_bad_base64":  {"v2:!!!not-base64", 256, true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

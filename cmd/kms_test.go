@@ -20,12 +20,12 @@ func TestParseProviderKind(t *testing.T) {
 		want    kms.ProviderKind
 		wantErr bool
 	}{
-		"gcp":          {"gcp", kms.GCP, false},
-		"upper_GCP":    {"GCP", kms.GCP, false},
-		"trimmed":      {"  azure  ", kms.Azure, false},
-		"aws":          {"aws", kms.AWS, false},
-		"unknown":      {"vault", "", true},
-		"empty":        {"", "", true},
+		"gcp":       {"gcp", kms.GCP, false},
+		"upper_GCP": {"GCP", kms.GCP, false},
+		"trimmed":   {"  azure  ", kms.Azure, false},
+		"aws":       {"aws", kms.AWS, false},
+		"unknown":   {"vault", "", true},
+		"empty":     {"", "", true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

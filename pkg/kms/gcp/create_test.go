@@ -38,6 +38,38 @@ func (f *fakeCreatorClient) GetCryptoKeyVersion(_ context.Context, _ *kmspb.GetC
 
 func (f *fakeCreatorClient) Close() error { return nil }
 
+func TestCreateKeyThroughInjectedClient(t *testing.T) {
+	versionName := "projects/p/locations/us/keyRings/r/cryptoKeys/mykey/cryptoKeyVersions/1"
+	fake := &fakeCreatorClient{
+		createResp: &kmspb.CryptoKey{
+			Primary: &kmspb.CryptoKeyVersion{Name: versionName, State: kmspb.CryptoKeyVersion_ENABLED},
+		},
+	}
+	prev := newCreatorClient
+	newCreatorClient = func(context.Context) (creatorClient, error) { return fake, nil }
+	t.Cleanup(func() { newCreatorClient = prev })
+
+	got, err := CreateKey(context.Background(), CreateKeyParams{Project: "p", Location: "us", Keyring: "r", Name: "mykey"})
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	if got != versionName {
+		t.Errorf("CreateKey returned %q, want %q", got, versionName)
+	}
+}
+
+func TestCreateKeyClientConstructionError(t *testing.T) {
+	prev := newCreatorClient
+	newCreatorClient = func(context.Context) (creatorClient, error) {
+		return nil, errors.New("ADC not found")
+	}
+	t.Cleanup(func() { newCreatorClient = prev })
+
+	if _, err := CreateKey(context.Background(), CreateKeyParams{Project: "p", Location: "us", Keyring: "r", Name: "k"}); err == nil {
+		t.Error("expected client-construction error")
+	}
+}
+
 func TestCreateKeyHappyPath(t *testing.T) {
 	versionName := "projects/p/locations/us/keyRings/r/cryptoKeys/mykey/cryptoKeyVersions/1"
 	client := &fakeCreatorClient{
@@ -120,4 +152,3 @@ func TestCreateKeyPropagatesAPIError(t *testing.T) {
 		t.Errorf("expected API error, got %v", err)
 	}
 }
-
