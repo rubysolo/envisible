@@ -14,9 +14,19 @@ import (
 )
 
 var runCmd = &cobra.Command{
-	Use:   "run -- [command]",
+	Use:   "run [command]",
 	Short: "Run a command with decrypted environment variables",
-	Args:  cobra.MinimumNArgs(1),
+	Long: `Run a command with decrypted environment variables.
+
+Flag parsing stops at the command, so the child command's own flags pass
+through untouched:
+
+  envisible run ruby -r./config/environment script.rb
+  envisible run -f prod.env -- printenv DATABASE_URL
+
+envisible's own flags (-f, -k) must come before the command; a '--'
+separator is accepted but not required.`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dec, err := loadDecryptor(cmd.Context())
 		if err != nil {
@@ -76,5 +86,8 @@ var runCmd = &cobra.Command{
 }
 
 func init() {
+	// Stop flag parsing at the first positional so the child command's flags
+	// (e.g. `ruby -e ...`) are never mistaken for envisible flags.
+	runCmd.Flags().SetInterspersed(false)
 	rootCmd.AddCommand(runCmd)
 }

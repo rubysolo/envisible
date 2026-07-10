@@ -283,6 +283,34 @@ func TestRun(t *testing.T) {
 	}
 }
 
+// Child-command flags must pass through without '--': flag parsing stops at
+// the first positional, so e.g. `envisible run sh -c ...` works as-is.
+func TestRunChildFlagsWithoutDashDash(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "envisible-run-flags")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"keygen"})
+	rootCmd.Execute()
+
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"run", "sh", "-c", "echo child-flags-ok"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("run with child flags failed: %v", err)
+	}
+	if !contains(b.String(), "child-flags-ok") {
+		t.Errorf("expected child command output, got: %s", b.String())
+	}
+}
+
 func TestGitIntegration(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "envisible-git")
 	if err != nil {
