@@ -22,5 +22,12 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache: true
 
+      # Separate from the test step so a proxy.golang.org hiccup shows up as a
+      # failed download, not as "[setup failed]" buried in test output, and so
+      # it can be retried. The module cache makes this a no-op on warm runs.
+      - name: Download modules
+        run: |
+          for i in 1 2 3; do go mod download && break || sleep $((i * 10)); done
+
       - name: Run tests
         run: go test -v ./...
