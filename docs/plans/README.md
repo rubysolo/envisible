@@ -13,6 +13,7 @@ root stays the high-level roadmap; these are the detailed designs behind individ
 | 03 | [`-` for stdin/stdout](03-stdin-stdout.md) | Feature — pipe support, no plaintext temp files | — |
 | 04 | [Private key by value](04-key-material-by-value.md) | Feature — let a secret manager hold `envisible.key` | — |
 | 05 | [`envisible set`](05-envisible-set.md) | Feature — write a secret into a file without the plaintext ever being in it | 03 (shares stdin intake) |
+| 06 | [`set` command hardening](06-set-command-hardening.md) | Correctness — `set` diverges from the CLI's own conventions | 01–05 (all landed) |
 
 ## Suggested landing order
 
@@ -23,6 +24,7 @@ root stays the high-level roadmap; these are the detailed designs behind individ
 03 ─┤
 04 ─┘
         05 ── after 03
+             06 ── after 05 (cross-plan cleanup)
 ```
 
 01 first and by itself. It is the only plan that fixes an active silent-failure path
