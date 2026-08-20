@@ -11,6 +11,7 @@ import (
 	"github.com/rubysolo/envisible/pkg/crypto"
 	"github.com/rubysolo/envisible/pkg/kms"
 	"github.com/rubysolo/envisible/pkg/processor"
+	"github.com/rubysolo/envisible/pkg/ui"
 )
 
 // loadEncryptor returns an Encryptor backed by the configured public-key file.
@@ -34,8 +35,10 @@ func loadEncryptor() (processor.Encryptor, error) {
 //   - v2 pubkey + privkey   → CompositeDecryptor [NaCl, Envelope] (mixed v1/v2 file)
 //   - no pubkey + privkey   → NaclDecryptor (legacy, pubkey not required for decrypt)
 //
-// Reading the v1 envisible.key is best-effort: a project that has fully migrated
-// to v2 won't have one and shouldn't be required to.
+// The v1 private key may arrive as material (ENVISIBLE_KEY, resolved into
+// privKeyMaterial by resolveKeySources) or as a file at privKeyPath. Reading the
+// file is best-effort: a project that has fully migrated to v2 won't have one
+// and shouldn't be required to.
 func loadDecryptor(ctx context.Context) (processor.Decryptor, error) {
 	info, _, pubErr := kms.LoadPublicKey(pubKeyPath)
 	if pubErr != nil && !errors.Is(pubErr, fs.ErrNotExist) {
@@ -44,15 +47,27 @@ func loadDecryptor(ctx context.Context) (processor.Decryptor, error) {
 
 	var naclDec processor.NaclDecryptor
 	haveNacl := false
-	if privData, err := os.ReadFile(privKeyPath); err == nil {
-		priv, err := crypto.DecodeKey(strings.TrimSpace(string(privData)))
+	if privKeyMaterial != "" {
+		// ENVISIBLE_KEY carries the key itself. Never name the value in an error:
+		// crypto.DecodeKey's failures report a byte offset or a length, not content.
+		priv, err := crypto.DecodeKey(strings.TrimSpace(privKeyMaterial))
 		if err != nil {
-			return nil, fmt.Errorf("failed to decode private key: %w", err)
+			return nil, fmt.Errorf("failed to decode private key from ENVISIBLE_KEY: %w", err)
 		}
 		naclDec = processor.NaclDecryptor{PrivateKey: priv}
 		haveNacl = true
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("failed to read private key: %w", err)
+	} else {
+		if privData, err := os.ReadFile(privKeyPath); err == nil {
+			warnIfKeyFilePermissive(privKeyPath)
+			priv, err := crypto.DecodeKey(strings.TrimSpace(string(privData)))
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode private key: %w", err)
+			}
+			naclDec = processor.NaclDecryptor{PrivateKey: priv}
+			haveNacl = true
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("failed to read private key: %w", err)
+		}
 	}
 
 	var envDec *processor.EnvelopeDecryptor
@@ -89,4 +104,19 @@ func loadProvider(ctx context.Context) (processor.Encryptor, processor.Decryptor
 		return nil, nil, err
 	}
 	return enc, dec, nil
+}
+
+// warnIfKeyFilePermissive warns when the private key file is readable by anyone
+// other than its owner. keygen writes 0600; a key that has since been copied,
+// checked out, or chmod'd loses that and nothing else would notice. This never
+// fails the command — breaking a working setup over a permission bit is worse
+// than the bit.
+func warnIfKeyFilePermissive(path string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		ui.Warn("private key %s is mode %#o (readable beyond its owner); consider `chmod 600 %s`", path, mode, path)
+	}
 }
