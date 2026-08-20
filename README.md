@@ -6,7 +6,7 @@ Your secrets normally live somewhere your config doesn't: a separate secret stor
 
 Two key-management modes are supported:
 
-- **Local keypair** (default) — a NaCl Box keypair (Curve25519 + XSalsa20-Poly1305) generated with `envisible keygen`. Simple, no network, no cost. The private key file (`envisible.key`) must be kept off-repo and provisioned to anything that needs to decrypt.
+- **Local keypair** (default) — a NaCl Box keypair (Curve25519 + XSalsa20-Poly1305) generated with `envisible keygen`. Simple, no network, no cost. The private key must be kept off-repo and provisioned to anything that needs to decrypt — as a file (`envisible.key`) or as material in `ENVISIBLE_KEY`; see [Providing the private key](#providing-the-private-key).
 - **Cloud KMS** — an asymmetric RSA-OAEP-SHA-256 key in **Google Cloud KMS**, **AWS KMS**, or **Azure Key Vault**. The private half never leaves the cloud; only the public key is downloaded into `envisible.pub`. Decryption authenticates via the cloud SDK's default credential chain (gcloud auth / IAM role / Managed Identity / etc.). See [Cloud KMS-backed keys](#cloud-kms-backed-keys) below.
 
 ## Installation
@@ -119,6 +119,27 @@ All informational output (`Loading environment…`, `Starting:`, KMS summaries, 
 envisible -q run -- ./deploy.sh   # no banner on stderr either
 ```
 
+### Reading from stdin
+
+`encrypt`, `decrypt` and `check` accept `-` as the file argument, meaning "read stdin to EOF". Output already defaults to stdout, so both halves of a pipe work and a value can go from a producing process to ciphertext with no plaintext file at any point:
+
+```bash
+# encrypt whatever a generator produces, straight into a committable file
+render-config | envisible encrypt - > config.enc.yaml
+
+# validate content before it is written anywhere
+render-config | envisible check -
+```
+
+- `-f -` is identical to a positional `-`.
+- `--inplace` / `-i` together with `-` is an **error**, not a silently ignored flag — there is no file to rewrite, and a script must not believe it wrote one.
+- Reading from a terminal is refused immediately (`refusing to read from a terminal; pipe input or pass a file path`) rather than looking like a hang. Empty piped input is fine: an empty file is a legitimate thing to encrypt.
+- `check` names the target `<stdin>` in its messages.
+- `edit -` and `run -f -` are rejected with a pointer at the right command: `edit` has no file to open, and `run` must leave stdin to the child process.
+- A file literally named `-` becomes unreachable by that name; `./-` still works.
+
+To move a secret that lives in an external store into a file, prefer [`envisible set`](#setting-a-value-without-writing-plaintext) — the plaintext never enters the file at all.
+
 ### 5. Editing Secrets
 To edit secrets without manually decrypting and re-encrypting:
 
@@ -133,6 +154,130 @@ Ensure no unencrypted secrets are committed:
 ```bash
 envisible check config.yaml
 ```
+
+### Providing the private key
+
+Decryption (`decrypt`, `run`, `edit`, `check --verify`) needs the local private key. It can be supplied as a **path** or as **material** — the base64 string `keygen` writes, with surrounding whitespace ignored:
+
+| Source | Kind | Example |
+| --- | --- | --- |
+| `--key` / `-k` | path | `envisible run -k /run/secrets/envisible.key -- ./app` |
+| `ENVISIBLE_KEY` | key material | `ENVISIBLE_KEY="$(cat envisible.key)" envisible run -- ./app` |
+| `ENVISIBLE_KEY_PATH` | path | `export ENVISIBLE_KEY_PATH=~/.config/envisible/app.key` |
+| `envisible.key` | path | the built-in default |
+
+Resolution order, highest wins:
+
+1. **`--key` / `-k` explicitly passed** — always a path. Passing it also disables `ENVISIBLE_KEY` for that run, so an operator can override an inherited env var without unsetting it.
+2. **`ENVISIBLE_KEY`** — the key material itself.
+3. **`ENVISIBLE_KEY_PATH`** — a path.
+4. **`envisible.key`** in the working directory.
+
+**`ENVISIBLE_KEY` vs `ENVISIBLE_KEY_PATH`.** One word apart, and the difference is the whole point: `ENVISIBLE_KEY` *is* the key; `ENVISIBLE_KEY_PATH` *points at a file* holding it. Material never reaches a log line, an error, or argv — a malformed `ENVISIBLE_KEY` reports `failed to decode private key from ENVISIBLE_KEY: …` with the decoder's offset or length, never any of the value. (The public key resolves the same way, minus the by-value option: `--pub` / `-p`, then `ENVISIBLE_PUB_PATH`, then `envisible.pub`. In Cloud KMS mode there is no private key on this side at all.)
+
+When the key is read from a **file** whose mode is group- or world-readable, envisible warns on stderr and carries on — breaking a working setup over a permission bit would be worse than the bit:
+
+```
+private key envisible.key is mode 0644 (readable beyond its owner); consider `chmod 600 envisible.key`
+```
+
+To capture a fresh key into a store with no disk round-trip:
+
+```bash
+envisible keygen --print-key | secret-store set envisible-key
+```
+
+`--print-key` writes `envisible.pub` as usual, prints the private key to **stdout**, and writes no `envisible.key`. It refuses when stdout is a terminal — the one thing worse than a key file is a key in scrollback — and it refuses *before* generating anything, so a refused run leaves no artifacts.
+
+#### Is an env var safer than a 0600 file?
+
+Not strictly. It is **differently** safe, and the trade is worth making on purpose:
+
+- **Better:** no disk artifact. Nothing to back up, index, `scp`, or find still sitting there in 2027.
+- **Worse:** on Linux, `/proc/<pid>/environ` exposes it to any process running as the same user, and it is inherited by every child process unless the caller scopes it.
+- **Roughly equal:** anything already running as you can read either one.
+
+The mitigation is **scoping, and it belongs to the caller**. A store that injects the material into a single child process puts it in exactly one environment and never in the parent shell:
+
+```bash
+secret-store exec envisible-key --as ENVISIBLE_KEY -- envisible run -- npm start
+```
+
+A CI runner that exports the same variable globally for the whole job gets the weaker version of this. Envisible cannot tell the two apart; the env var is a better provisioning *mechanism*, not an upgrade on its own.
+
+## Values are delivered byte-exactly
+
+**This is a behavior change.** `envisible run` now hands the child process exactly the bytes that were encrypted. Previously the whole file was decrypted first and the *result* was parsed as dotenv, which fed the plaintext of every secret back through a parser that trimmed whitespace and stripped quotes. Structure is now resolved against the still-encrypted file, and values are decrypted afterwards.
+
+| `.env` line | `run` used to deliver | `run` delivers now |
+| --- | --- | --- |
+| `PW=ENC[sk_live_abc ]` (trailing space in the secret) | `sk_live_abc` | `sk_live_abc ` |
+| `PW=ENC["quoted"]` (quotes are part of the secret) | `quoted` | `"quoted"` |
+| `PW="'bar'"` (a literal, no marker) | `bar` | `'bar'` |
+| `export FOO=ENC[…]` | key `export FOO` | key `FOO` |
+| `FOO=ENC[…] # note` | value with ` # note` glued on | value without it |
+| a CRLF file | `\r` on every value (masked by the trim) | no `\r` anywhere |
+
+Quoting is a property of **how a value is written in the file**, never of the secret:
+
+- A value that is exactly one marker — optionally wrapped in one matching pair of quotes — is delivered **verbatim**. No trimming, no unquoting. Whitespace and quotes *inside* the marker belong to the secret.
+- Anything else is file text: it is trimmed, exactly one matching surrounding quote pair is removed (so `FOO="'bar'"` is `'bar'`, not `bar`), and any markers embedded in it are decrypted and spliced in place — which is what keeps `DATABASE_URL=postgres://u:ENC[…]@host/db` working.
+
+Because parsing happens before decryption, **secret content can no longer alter the environment**. A secret whose plaintext is
+
+```
+hunter2
+PATH=/tmp/evil
+```
+
+produces exactly one variable holding that two-line string; no `PATH` entry appears. Lines that are not `NAME=value` assignments are skipped *out loud* — `run` warns with `file:line:col` instead of dropping them in silence.
+
+Upgrade note: a project that accidentally relied on the old trimming will see a different value, and one relying on the broken `export FOO` key name will find that key gone and `FOO` present instead. envisible files are still not shell — no `$VAR` interpolation, no command substitution, no `"""` literals.
+
+## Setting a value without writing plaintext
+
+`envisible encrypt` and `envisible edit` both require the plaintext to exist in a file before it can be protected. `envisible set` does not: it reads the value from **stdin**, encrypts it in memory, and splices only the ciphertext into a `.env`-shaped file.
+
+```bash
+printf '%s' "$TOKEN" | envisible set .env API_TOKEN -
+secret-store get api-token   | envisible set API_TOKEN -      # file defaults to -f / .env
+secret-store export --json   | envisible set --from-json -    # a whole set, one unlock
+cat some.env                 | envisible set --from-env -
+```
+
+Encryption is a public-key operation, so this works with **`envisible.pub` alone** — a developer holding no decrypt capability at all can still add and rotate secrets.
+
+The trailing `-` is mandatory and there is deliberately **no `--value` flag**: an argument is visible in `ps`, in shell history, and in every process listing on the machine.
+
+Flags: `--from-json` (a JSON object of `KEY` → string) and `--from-env` (dotenv-shaped lines) for multi-key payloads on stdin, plus `--dry-run`, `--if-changed`, `--raw` and `--allow-empty`. The two payload flags are mutually exclusive, and `--from-env` reads its input as plaintext — an `ENC[...]` in the payload stays literal text rather than being opened.
+
+What it guarantees:
+
+- **Layout is preserved.** An existing key keeps its `export ` prefix, indentation, spacing and trailing `# comment`; only the value span is rewritten. A new key is appended with exactly one trailing newline. Everything else — comments, ordering, unrelated lines — is copied byte for byte. If a key is assigned more than once, the last assignment is the one rewritten, because that is the one `run` would use.
+- **Writes are atomic**: a temp file in the same directory, `fsync`, `rename`, with the file's existing mode preserved (0644 for a new file).
+- **Exactly one trailing newline is trimmed** from stdin, since editors, heredocs and `echo` all add one and a credential with a stray `\n` fails far from the command that broke it. Trimming exactly one means a multi-line secret keeps its shape; `--raw` keeps the bytes verbatim.
+- **Empty stdin is an error and nothing is written.** A process that dies upstream in a pipe closes it with no bytes, which at this end is indistinguishable from success — without the guard, a live credential would be replaced with an empty one and reported as done. Pass `--allow-empty` when you mean it.
+- A terminal on stdin is refused, an invalid key name is rejected before the file is touched, and a target that is not dotenv-shaped (a JSON document, a YAML `---`, a file of `key: value` lines) is rejected with a pointer at `envisible edit`.
+- **No value ever reaches stdout or stderr**, including in error messages. Reports name keys only: `set STRIPE_KEY (updated), AWS_REGION (added)`.
+
+The value goes straight to the encryptor, so it never passes through the plaintext marker grammar — no escaping, no ambiguity, whatever bytes the secret contains.
+
+### `set` is not a sync primitive
+
+Encryption is randomized: a fresh ephemeral keypair and nonce per value in v1, a fresh data key and nonce in v2. **Re-encrypting an unchanged value always produces different ciphertext**, so re-running `set` always produces a diff even when nothing changed.
+
+That matters more than it sounds. A noisy diff is a security regression in a tool whose central claim is that secret changes show up in code review. So, deliberately:
+
+- `set` writes **only the keys it was given**. There is no "sync the whole file" mode.
+- `--from-json` writes — and therefore churns — every key in the payload.
+- `--if-changed` decrypts the current value and skips keys that already match. It needs decrypt capability, so it is opt-in; without one it fails loudly rather than quietly rewriting everything.
+- `--dry-run` reports per key (`added` / `updated` / `unchanged`) and writes nothing.
+
+Use `set` to **add** a key and to **rotate** a key. A periodic "push everything" loop built on top of it will produce diffs nobody reads.
+
+### Two sources of truth
+
+Once a credential lives both in an external store and in a committed envisible file, **rotation has to touch both**, and nothing detects the drift for you. Drift detection needs decrypt capability, which the developer machine deliberately may not have. The realistic place for that check is CI: a job that does hold decrypt permission runs `envisible check --verify` and, if the project wants it, compares against whatever the canonical source is.
 
 ## Cloud KMS-backed keys
 
@@ -275,11 +420,81 @@ This installs a `.git/hooks/pre-commit` script that runs `envisible check` on st
 
 ## How it Works
 
-- **Markers**: Look for `ENC[content]`.
-- **Encryption**: Replaces `ENC[content]` with `ENC[v1:base64_ciphertext]`.
+- **Markers**: `ENC[content]`, anywhere in any text file — a whole value, or a substring of one.
+- **Encryption**: replaces `ENC[content]` with `ENC[v1:base64_ciphertext]` (or `v2:` in Cloud KMS mode). Markers that already carry a `vN:` prefix are left alone, so `encrypt` is idempotent.
 - **Keys**:
-  - **Public Key**: Used for encryption. Can be shared.
-  - **Private Key**: Used for decryption. Must be protected.
+  - **Public Key**: used for encryption. Can be shared and committed.
+  - **Private Key**: used for decryption. Must be protected — see [Providing the private key](#providing-the-private-key).
+- **Comments**: a `#` at the start of a line, or preceded by a space or tab, and not inside a marker, opens a comment that runs to the end of that line. Markers inside comments are never encrypted, decrypted, or re-wrapped, so an old ciphertext parked in a comment for reference is never sent to a KMS. A `#` *inside* a marker is ordinary content.
+
+### The marker grammar
+
+One scanner parses markers for every command, so `check` predicts exactly what `encrypt` will do. It reads a marker in one of two modes, chosen by what follows `ENC[`.
+
+**Ciphertext mode** — the body begins with a version prefix (`v1:`, `v2:`). The body runs to the first `]` and **may never cross a newline**: a versioned inner is a prefix plus standard base64, an alphabet that contains no `[`, `]`, `\` or newline. A ciphertext marker with no `]` before the end of its line is reported as malformed rather than ignored.
+
+**Plaintext mode** — anything else. The body runs to the `]` that closes it, **tracking bracket depth**, so balanced brackets need no escaping at all:
+
+```yaml
+sa: ENC[{"scopes":["a","b"]}]      # the value is the whole JSON object
+```
+
+and **plaintext may span lines**, so a PEM key or a pasted service-account blob is expressible for the first time:
+
+```yaml
+key: ENC[-----BEGIN PRIVATE KEY-----
+MIIEv…
+-----END PRIVATE KEY-----]
+```
+
+Ciphertext, by contrast, is always on one line.
+
+Three escapes are recognized inside a plaintext body — `\[`, `\]` and `\\` — for the brackets that balancing cannot cover:
+
+```yaml
+password: ENC[ab\]cd]      # the value is ab]cd
+```
+
+Everything envisible writes is escaped on the way out, so machine-written markers are unambiguous by construction: `decrypt` (without `--strip`) and `edit` emit `ENC[<escaped plaintext>]`, which makes the `edit` round-trip lossless for values containing `[`, `]` or `\`. A plaintext value that itself starts with something like `v1:` is written with a leading escape so it cannot be re-read as ciphertext.
+
+An `ENC[` that never closes is a **defect**, not an invisible no-op, and so is a ciphertext marker truncated at a newline. No marker body may contain another unescaped `ENC[` either — that invariant is what stops a stray `ENC[` in a comment from swallowing the real marker below it. Severity depends on whether the command is about to produce an artifact you might commit:
+
+| Command | On a defect |
+| --- | --- |
+| `encrypt`, `edit`, `check` | **error** with `file:line:col`, nothing written |
+| `decrypt`, `run`, `kms rotate` | **warn** on stderr and continue — a stray `ENC[` must not take down a deploy |
+
+```
+config.yaml:1:3: unterminated ENC[ marker (add the closing ']', or escape a literal bracket as '\[')
+```
+
+Defects inside comments are ignored: `# TODO: wrap this in ENC[` is prose, not a broken marker.
+
+#### Known limitation: an unbalanced `]` in a hand-written marker
+
+An unbalanced, unescaped `]` inside a **plaintext** marker is irreducibly ambiguous:
+
+```yaml
+password: ENC[ab]cd]      # is the secret "ab", or "ab]cd"?
+```
+
+Bracket balancing cannot resolve it — depth legitimately reaches zero at the first `]`. Envisible reads `ab`, leaves `cd]` in the file as ordinary text, and warns:
+
+```
+config.yaml:1:11: plaintext marker is followed by an unmatched ']' — if it is part of the secret, escape it as '\]'
+```
+
+Write `ENC[ab\]cd]` to mean `ab]cd`. There is a companion warning for a plaintext marker that spans lines, because a single forgotten `]` looks exactly like a deliberate two-line value:
+
+```
+.env:1:13: plaintext marker spans lines 1-2 and will be encrypted as one multi-line value — if the closing ']' is missing, those lines are about to be absorbed into the secret
+```
+
+Both are warnings, never errors: the file parses, and both readings are legal grammar.
+
+The real answer for machine-sourced secrets is not to use the plaintext grammar at all. [`envisible set`](#setting-a-value-without-writing-plaintext) hands the bytes straight to the encryptor, so no escaping is ever involved.
+
+The reasoning behind this grammar, and the alternatives that lost, are recorded in [ADR 0001](docs/adr/0001-enc-marker-grammar.md).
 
 ## License
 

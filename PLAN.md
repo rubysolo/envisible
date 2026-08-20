@@ -9,7 +9,7 @@
     - [X] Encryption (ephemeral sender, static recipient).
     - [X] Decryption (static recipient).
 - [X] **Processing Engine**: Implement `pkg/processor`.
-    - [X] Regex-based marker detection (`ENC[...]`).
+    - [X] Regex-based marker detection (`ENC[...]`). *(Superseded in Phase 3 by the marker scanner.)*
     - [X] Logic to skip already encrypted values (`ENC[v1:...]`).
     - [X] Unit tests for processor logic.
 
@@ -40,7 +40,22 @@
         - `run`: Visual confirmation that the proper environment is being configured before executing the given command
 - [X] **Git Integration**: Investigate `git diff` drivers to show plaintext diffs locally (if keys are present).
 - [X] **Cloud Key Providers**: KMS-backed v2 envelope format with GCP KMS / AWS KMS / Azure Key Vault. `envisible kms init` / `kms create` / `kms rotate`. v1 (local NaCl) and v2 (KMS) coexist side-by-side; mixed-marker files supported via composite decryptor.
+- [X] **Marker Grammar & Scanner** ([plan 01](docs/plans/01-marker-scanner.md), [ADR 0001](docs/adr/0001-enc-marker-grammar.md)): replaced the line-scoped `ENC\[(.*?)\]` regex with a single hand-written scanner used by every command.
+    - [X] Bracket-balanced plaintext bodies, `\[` / `\]` / `\\` escapes, multi-line plaintext; ciphertext still single-line and byte-identical to the old parse.
+    - [X] Defects (`unterminated`, `malformed ciphertext`) reported with `file:line:col` — an error on `encrypt`/`edit`/`check`, a warning on `decrypt`/`run`/`kms rotate`.
+    - [X] Heuristic warnings for the two ambiguous-but-legal shapes: an unmatched trailing `]`, and a plaintext marker that spans lines.
+    - [X] Comment regions resolved against marker spans, which also gave `kms rotate` the comment skipping it was missing.
+    - [X] Known limitation (an unbalanced unescaped `]` in a hand-written marker) documented in README + ADR rather than silently guessed at.
+- [X] **Byte-exact env values** ([plan 02](docs/plans/02-env-value-fidelity.md)): `ExtractEnv` parses structure against the still-encrypted file and decrypts afterwards, so `run` delivers the exact plaintext bytes.
+    - [X] No trimming or unquoting of decrypted values; dotenv quoting applies to file text only (exactly one surrounding quote pair).
+    - [X] `export ` prefixes, inline `# comments` and CRLF handled; non-assignment lines skipped with a warning instead of in silence.
+    - [X] Secret content can no longer add, remove or alter another variable in the child environment.
+- [X] **stdin/stdout piping** ([plan 03](docs/plans/03-stdin-stdout.md)): `-` as the target for `encrypt`, `decrypt` and `check`, with a TTY refusal, an `--inplace` rejection, and `<stdin>` in messages. `edit -` and `run -f -` rejected with a pointer at the right command.
+- [X] **Private key by value** ([plan 04](docs/plans/04-key-material-by-value.md)): `ENVISIBLE_KEY` carries the key material alongside the path-valued `ENVISIBLE_KEY_PATH`; resolution order is explicit `--key` > `ENVISIBLE_KEY` > `ENVISIBLE_KEY_PATH` > `envisible.key`, resolved in `PersistentPreRunE`. `keygen --print-key` emits the key on stdout (refused on a TTY) and writes no key file; a group/world-readable key file warns.
+- [X] **`envisible set`** ([plan 05](docs/plans/05-envisible-set.md)): stdin-only writer that encrypts in memory and splices ciphertext into a .env-shaped file, so the plaintext never enters the file, the disk, or argv. Works with `envisible.pub` alone. Layout, comments and file mode preserved; atomic write; `--from-json` / `--from-env` / `--dry-run` / `--if-changed` / `--raw` / `--allow-empty`; empty stdin and non-dotenv targets refused. Churn (randomized encryption) and the two-sources-of-truth consequence documented, not discovered.
 - [ ] **IDE Integration**: VS Code plugin for auto-encrypt on save (Deferred).
 - [X] **Pre-commit Hooks**: Helper script to ensure no plaintext `ENC[...]` markers are committed.
 - [X] **Release**: Setup GitHub Actions for cross-platform binary builds.
 - [X] **Verification**: Command to safely verify that a file is encrypted with the expected key.
+
+Detailed designs for the five changes above live in [`docs/plans/`](docs/plans/); durable decisions with real alternatives are recorded in [`docs/adr/`](docs/adr/).
