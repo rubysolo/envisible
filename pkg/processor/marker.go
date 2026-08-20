@@ -220,6 +220,21 @@ func scanCiphertextBody(content []byte, inner int) (int, bodyStatus) {
 func scanPlaintextBody(content []byte, inner int) (int, bool) {
 	depth := 1
 	for j := inner; j < len(content); j++ {
+		if content[j] == '\\' && j+1 < len(content) && content[j+1] == '\n' {
+			j++ // escaped newline: an explicit continuation, keep scanning
+			continue
+		}
+		if content[j] == '\n' {
+			// A plaintext body never crosses a line. Without this, a single
+			// forgotten ']' silently absorbs the following config lines into
+			// the secret: `encrypt` writes one marker, exits 0, and the
+			// absorbed lines are gone from the file with no defect reported.
+			// Bounding the body to its own line turns that typo into a loud
+			// Unterminated defect. A value that genuinely contains newlines
+			// reaches the file as \n escapes (see escapeMarkerValue) or via
+			// `envisible set`, which never puts plaintext in the file at all.
+			return 0, false
+		}
 		if opensMarkerAt(content, j) {
 			// An unescaped ENC[ inside a body means this body never closed:
 			// the author forgot a ']', or left a stray bracket in prose. Bail
@@ -271,7 +286,7 @@ func scanPlaintextBody(content []byte, inner int) (int, bool) {
 // puts the 'v' back.
 func escapeMarkerValue(s string) string {
 	looksVersioned := IsEncryptedInner(s)
-	if !looksVersioned && !strings.ContainsAny(s, `\[]`) {
+	if !looksVersioned && !strings.ContainsAny(s, "\\[]\n") {
 		return s
 	}
 	var b strings.Builder
@@ -283,8 +298,18 @@ func escapeMarkerValue(s string) string {
 		switch s[i] {
 		case '\\', '[', ']':
 			b.WriteByte('\\')
+			b.WriteByte(s[i])
+		case '\n':
+			// A real newline is escaped as backslash-newline, a continuation.
+			// Deliberately NOT the two-character sequence `\n`: a single-line
+			// JSON service-account key carries literal `\n` inside its
+			// private_key field, and treating those as newlines would corrupt
+			// the exact payload this tool exists to protect.
+			b.WriteByte('\\')
+			b.WriteByte('\n')
+		default:
+			b.WriteByte(s[i])
 		}
-		b.WriteByte(s[i])
 	}
 	return b.String()
 }
@@ -306,6 +331,10 @@ func unescapeMarkerValue(s string) string {
 			switch s[i+1] {
 			case '\\', '[', ']':
 				b.WriteByte(s[i+1])
+				i++
+				continue
+			case '\n':
+				b.WriteByte('\n')
 				i++
 				continue
 			case 'v':
@@ -466,23 +495,4 @@ func UnmatchedTrailingBracket(content []byte, m Marker) bool {
 		}
 	}
 	return false
-}
-
-// MultiLinePlaintext reports whether a plaintext marker's body crosses a
-// newline.
-//
-// Multi-line plaintext is a supported value shape — a PEM key or a pasted
-// service-account JSON has to be expressible — so this is not a defect. It is
-// the second heuristic in the grammar, and it covers the shape the trailing-']'
-// heuristic cannot see:
-//
-//	DB_PASSWORD=ENC[hunter2
-//	ALLOWED_HOST=example.com]
-//
-// A single forgotten ']' turns the next config line into part of the secret,
-// and bracket balancing has no way to tell that from a deliberate two-line
-// value. Encrypting it deletes the absorbed line from the file, so the write
-// paths warn with the line range before doing it.
-func MultiLinePlaintext(m Marker) bool {
-	return !m.Encrypted && strings.Contains(m.Raw, "\n")
 }

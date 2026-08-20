@@ -57,10 +57,6 @@ func warnAmbiguousMarker(file string, content []byte, m processor.Marker) {
 	if processor.UnmatchedTrailingBracket(content, m) {
 		ui.Warn("%s:%d:%d: plaintext marker is followed by an unmatched ']' — if it is part of the secret, escape it as '\\]'", file, line, col)
 	}
-	if processor.MultiLinePlaintext(m) {
-		endLine, _ := processor.LineCol(content, m.End-1)
-		ui.Warn("%s:%d:%d: plaintext marker spans lines %d-%d and will be encrypted as one multi-line value — if the closing ']' is missing, those lines are about to be absorbed into the secret", file, line, col, line, endLine)
-	}
 }
 
 // warnAmbiguousMarkers runs warnAmbiguousMarker over every effective marker in

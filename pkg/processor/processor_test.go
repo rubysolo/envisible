@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/rubysolo/envisible/pkg/crypto"
@@ -569,7 +570,8 @@ func TestEvidenceRowMultiLineValue(t *testing.T) {
 	ctx := context.Background()
 
 	const pem = "-----BEGIN KEY-----\nMIIEv\n-----END KEY-----"
-	content := []byte("key: ENC[" + pem + "]\nother: plain\n")
+	contPEM := strings.ReplaceAll(pem, "\n", "\\\n")
+	content := []byte("key: ENC[" + contPEM + "]\nother: plain\n")
 
 	encrypted, defects, err := EncryptContentWithDefects(content, NaclEncryptor{PublicKey: pub})
 	if err != nil {
@@ -726,31 +728,6 @@ func TestRewrapContentSkipsCiphertextInComments(t *testing.T) {
 	}
 	if n := bytes.Count(rotated, []byte("ENC["+stale+"]")); n != 2 {
 		t.Errorf("commented ciphertexts were sent to the KMS: found %d of 2 unchanged", n)
-	}
-}
-
-func TestExtractEnvRejectsMultiLineValues(t *testing.T) {
-	// A multi-line plaintext is now expressible, and `run` splits on newlines,
-	// so an unguarded value could inject extra variables into the child
-	// environment. Fail loudly instead.
-	pub, priv, _ := crypto.GenerateKeypair()
-	content := []byte("SAFE=ENC[ok]\nEVIL=ENC[first\\nINJECTED=yes]\n")
-	content = bytes.ReplaceAll(content, []byte(`\n`), []byte("\n"))
-
-	encrypted, err := EncryptContent(content, NaclEncryptor{PublicKey: pub})
-	if err != nil {
-		t.Fatalf("EncryptContent: %v", err)
-	}
-
-	env, err := ExtractEnv(context.Background(), encrypted, NaclDecryptor{PrivateKey: priv})
-	if err == nil {
-		t.Fatalf("expected a multi-line value to be rejected; got env %v", env)
-	}
-	if !bytes.Contains([]byte(err.Error()), []byte("EVIL")) || !bytes.Contains([]byte(err.Error()), []byte("multi-line")) {
-		t.Errorf("error should name the offending key and the reason; got: %v", err)
-	}
-	if env != nil {
-		t.Errorf("no environment should be returned on failure; got %v", env)
 	}
 }
 
@@ -971,29 +948,23 @@ func TestEditRoundTripOfAVersionPrefixedSecret(t *testing.T) {
 	}
 }
 
-// A forgotten ']' makes the following config line part of the secret, and
-// balancing cannot tell that from a deliberate two-line value. The scanner
-// still reads it as one marker — but it is flagged, so the write paths warn
-// with the line range before the absorbed line disappears into the ciphertext.
-func TestMultiLinePlaintextIsFlaggedForTheWritePaths(t *testing.T) {
-	content := []byte("DB_PASSWORD=ENC[hunter2\nALLOWED_HOST=example.com]\nDEBUG=1\n")
+// TestEvidenceRowBareMultiLineMarkerIsADefect is the other half of evidence
+// row 3. A plaintext body ends at the first unescaped newline, so a value
+// pasted in raw across lines no longer silently survives as cleartext: it is
+// reported as an unterminated marker and the write paths refuse the file.
+func TestEvidenceRowBareMultiLineMarkerIsADefect(t *testing.T) {
+	pub, _, _ := crypto.GenerateKeypair()
+	content := []byte("key: ENC[-----BEGIN KEY-----\nMIIEv\n-----END KEY-----]\n")
 
 	markers, defects := Scan(content)
-	if len(defects) != 0 {
-		t.Fatalf("defects: %+v", defects)
+	if len(markers) != 0 {
+		t.Errorf("a bare multi-line body must not parse as a marker; got %+v", markers)
 	}
-	if len(markers) != 1 {
-		t.Fatalf("got %d markers, want 1: %+v", len(markers), markers)
+	if len(defects) != 1 || defects[0].Kind != Unterminated {
+		t.Fatalf("want exactly one Unterminated defect, got %+v", defects)
 	}
-	if markers[0].Value != "hunter2\nALLOWED_HOST=example.com" {
-		t.Fatalf("unexpected value %q", markers[0].Value)
-	}
-	if !MultiLinePlaintext(markers[0]) {
-		t.Errorf("a plaintext marker that absorbed the next line must be flagged")
-	}
-	startLine, _ := LineCol(content, markers[0].Start)
-	endLine, _ := LineCol(content, markers[0].End-1)
-	if startLine != 1 || endLine != 2 {
-		t.Errorf("warning would name lines %d-%d, want 1-2", startLine, endLine)
+
+	if _, got, _ := EncryptContentWithDefects(content, NaclEncryptor{PublicKey: pub}); len(got) != 1 {
+		t.Errorf("encrypt must surface the defect, got %+v", got)
 	}
 }

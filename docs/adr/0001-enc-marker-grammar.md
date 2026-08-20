@@ -52,9 +52,16 @@ what follows `ENC[`:
   written. That equivalence is what satisfies constraint 1. Truncation before
   the `]` is a `MalformedCiphertext` defect.
 - **Plaintext mode** for everything else: bracket-depth tracking (so balanced
-  brackets need no escaping), the escapes `\[`, `\]` and `\\`, and newlines as
-  ordinary content (so multi-line values are expressible at all). Depth still
-  positive at EOF is an `Unterminated` defect.
+  brackets need no escaping), the escapes `\[`, `\]`, `\\`, and
+  backslash-newline. **The body ends at the first unescaped newline**; depth
+  still positive there is an `Unterminated` defect. A value that genuinely
+  contains newlines is written with a backslash before each one, a continuation
+  in the shell tradition.
+
+  The newline escape is a backslash before a *real* line break, deliberately
+  not the two characters `\n`: a single-line JSON service-account key carries
+  literal `\n` inside its `private_key` field, and reading those as line breaks
+  would corrupt the exact payload this tool exists to protect.
 
 Everything envisible *writes* is escaped (`escapeMarkerValue`), so a
 machine-written marker never exceeds depth 1 and is unambiguous by
@@ -66,14 +73,31 @@ Defects are returned, not raised: the write and validate paths (`encrypt`,
 (`decrypt`, `run`, `kms rotate`) warn and continue, because a stray `ENC[` in a
 config file must not take down a deploy.
 
-Two refinements were added during implementation and are part of the decision:
+Three refinements were added during implementation and are part of the decision:
+
+- **A plaintext body may not cross a bare newline.** The first draft treated
+  newlines as ordinary content so that a PEM could be pasted in raw. Adversarial
+  review showed that this made a single forgotten `]` silently destructive:
+
+  ```
+  DB_PASSWORD=ENC[hunter2
+  ALLOWED_HOST=example.com]
+  ```
+
+  scanned as one two-line value, so `encrypt` wrote a single marker, exited 0,
+  and the `ALLOWED_HOST` line was gone — absorbed into the secret, with no
+  defect reported. Requiring an explicit backslash before each newline makes the
+  deliberate case explicit and the typo loud. The cost is that a raw pasted PEM
+  is now a defect rather than a value; the answer for such payloads is
+  `envisible set`, which never puts plaintext in the file at all.
 
 - **No marker body may contain another unescaped `ENC[`.** Without this
-  invariant a lone `ENC[` in a comment opens a body that runs across the
-  newline, absorbs the real `ENC[v1:...]` below it, and is then discarded as
-  commented-out — leaving a file with zero markers, zero defects, and a secret
-  nobody is going to encrypt. Anything envisible writes escapes `[`, so a
-  machine-written value never trips it.
+  invariant a lone `ENC[` in a comment opens a body that runs on, absorbs the
+  real `ENC[v1:...]` below it, and is then discarded as commented-out — leaving
+  a file with zero markers, zero defects, and a secret nobody is going to
+  encrypt. Anything envisible writes escapes `[`, so a machine-written value
+  never trips it. Newline termination alone would not have covered this, since
+  the swallow can happen within a single line.
 - **A plaintext value that itself begins `vN:` is written with a leading
   escape** (`ENC[\v1:…]`), and the escape is only honored at offset 0. Without
   it the `edit` round-trip would write such a secret back to disk in the clear
@@ -143,11 +167,10 @@ the hand-authored grammar buys nothing. Rejected.
 - One scanner, `processor.Scan`, is used by `encrypt`, `decrypt`, `check`,
   `edit`, `run` and `kms rotate`. `check` predicts what `encrypt` will do by
   construction rather than by keeping a second regex in sync.
-- Multi-line plaintext became creatable for the first time, which made the
-  documented "plaintexts are unbounded" claim true, and which is why
-  `ExtractEnv` had to be rewritten to parse structure before decrypting
-  (plan 02) — otherwise a multi-line secret could inject variables into a child
-  environment.
+- Multi-line plaintext became creatable for the first time — via explicit
+  backslash continuations, or via `envisible set` — which is why `ExtractEnv`
+  had to be rewritten to parse structure before decrypting (plan 02).
+  Otherwise a multi-line secret could inject variables into a child environment.
 - Comment handling is resolved in a fixed order — markers over the whole
   content, then comment regions against those spans, then filter — which
   removes the old per-line regex and gives `kms rotate` the comment skipping it
@@ -155,13 +178,15 @@ the hand-authored grammar buys nothing. Rejected.
 - **The one irreducible ambiguity is documented, not fixed.** In
   `password: ENC[ab]cd]` the secret may be `ab` or `ab]cd`; depth legitimately
   reaches zero at the first `]`. Envisible reads `ab` (unchanged from before)
-  and emits a heuristic warning suggesting `\]`. A second heuristic warns when
-  a plaintext marker spans lines, since one forgotten `]` is indistinguishable
-  from a deliberate two-line value. Both warn; neither fails.
+  and emits a heuristic warning suggesting `\]`. It warns; it never fails. This
+  is now the *only* ambiguity left: the multi-line form of the same problem was
+  removed outright by requiring a backslash before a newline.
 - Behavior changes for existing projects: an unterminated `ENC[` in a
   non-comment position now fails `encrypt` / `edit` / `check` (that file was
-  already silently broken), `\[` / `\]` / `\\` are now escapes inside plaintext
-  markers, and `kms rotate` no longer re-wraps ciphertext parked in comments.
+  already silently broken), `\[` / `\]` / `\\` / backslash-newline are now
+  escapes inside plaintext markers, a plaintext marker written raw across lines
+  is now a defect rather than a value, and `kms rotate` no longer re-wraps
+  ciphertext parked in comments.
 - Not a wire-format change: no `v3:`, no migration, no `envisible.pub` change.
   A file encrypted before this landed and one encrypted after are
   indistinguishable.

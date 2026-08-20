@@ -439,21 +439,32 @@ One scanner parses markers for every command, so `check` predicts exactly what `
 sa: ENC[{"scopes":["a","b"]}]      # the value is the whole JSON object
 ```
 
-and **plaintext may span lines**, so a PEM key or a pasted service-account blob is expressible for the first time:
+A plaintext body **ends at the first unescaped newline**. A value that genuinely contains newlines is written with a backslash before each one — a continuation, in the shell tradition:
 
 ```yaml
-key: ENC[-----BEGIN PRIVATE KEY-----
-MIIEv…
+key: ENC[-----BEGIN PRIVATE KEY-----\
+MIIEv…\
 -----END PRIVATE KEY-----]
 ```
 
+Requiring the backslash is what makes a forgotten `]` a *typo* rather than a silent data loss. Without it, this
+
+```
+DB_PASSWORD=ENC[hunter2
+ALLOWED_HOST=example.com]
+```
+
+would encrypt as one two-line value and the `ALLOWED_HOST` line would vanish into the secret, with `encrypt` exiting 0. Now it is an unterminated marker and the write paths refuse the file.
+
 Ciphertext, by contrast, is always on one line.
 
-Three escapes are recognized inside a plaintext body — `\[`, `\]` and `\\` — for the brackets that balancing cannot cover:
+Four escapes are recognized inside a plaintext body — `\[`, `\]`, `\\`, and backslash-newline — for what balancing cannot cover:
 
 ```yaml
 password: ENC[ab\]cd]      # the value is ab]cd
 ```
+
+Note that the escape for a newline is a backslash followed by a **real** line break, not the two characters `\n`. That is deliberate: a single-line JSON service-account key carries literal `\n` sequences inside its `private_key` field, and reading those as line breaks would corrupt the exact payload this tool exists to protect. Inside a marker, `\n` is a backslash and an `n`.
 
 Everything envisible writes is escaped on the way out, so machine-written markers are unambiguous by construction: `decrypt` (without `--strip`) and `edit` emit `ENC[<escaped plaintext>]`, which makes the `edit` round-trip lossless for values containing `[`, `]` or `\`. A plaintext value that itself starts with something like `v1:` is written with a leading escape so it cannot be re-read as ciphertext.
 
@@ -484,13 +495,9 @@ Bracket balancing cannot resolve it — depth legitimately reaches zero at the f
 config.yaml:1:11: plaintext marker is followed by an unmatched ']' — if it is part of the secret, escape it as '\]'
 ```
 
-Write `ENC[ab\]cd]` to mean `ab]cd`. There is a companion warning for a plaintext marker that spans lines, because a single forgotten `]` looks exactly like a deliberate two-line value:
+Write `ENC[ab\]cd]` to mean `ab]cd`. This is a warning, never an error: the file parses, and both readings are legal grammar.
 
-```
-.env:1:13: plaintext marker spans lines 1-2 and will be encrypted as one multi-line value — if the closing ']' is missing, those lines are about to be absorbed into the secret
-```
-
-Both are warnings, never errors: the file parses, and both readings are legal grammar.
+It is also the *only* remaining ambiguity in the grammar. The multi-line version of this problem — a forgotten `]` absorbing the lines below it — was removed outright by requiring a backslash before a newline, so it is now a reported defect rather than a judgement call.
 
 The real answer for machine-sourced secrets is not to use the plaintext grammar at all. [`envisible set`](#setting-a-value-without-writing-plaintext) hands the bytes straight to the encryptor, so no escaping is ever involved.
 

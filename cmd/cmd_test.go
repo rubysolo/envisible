@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rubysolo/envisible/pkg/crypto"
@@ -1099,42 +1100,13 @@ func TestRunWarnsButSucceedsOnUnterminatedMarker(t *testing.T) {
 	}
 }
 
-// A multi-line secret must not be able to inject extra variables into the
-// child environment via `run`'s line-oriented .env parsing.
-func TestRunRejectsMultiLineValue(t *testing.T) {
-	setupKeyedTempDir(t)
-
-	if err := os.WriteFile(".env", []byte("EVIL=ENC[first\nINJECTED=yes]\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"encrypt", "-i", ".env"})
-	if err := rootCmd.Execute(); err != nil {
-		t.Fatalf("encrypt: %v", err)
-	}
-
-	b := bytes.NewBufferString("")
-	resetRoot(b)
-	rootCmd.SetArgs([]string{"run", "--", "env"})
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Fatalf("run must refuse a multi-line value; output was %q", b.String())
-	}
-	if !contains(err.Error(), "multi-line") {
-		t.Errorf("error should explain the refusal; got %v", err)
-	}
-	if contains(b.String(), "INJECTED=yes") {
-		t.Errorf("secret content leaked into the child environment: %s", b.String())
-	}
-}
-
 // End-to-end for the file shapes that used to be silently mangled.
 func TestEncryptDecryptRoundTripsBracketsAndMultiLineValues(t *testing.T) {
 	setupKeyedTempDir(t)
 
 	confFile := "config.yaml"
 	original := "sa: ENC[{\"scopes\":[\"a\",\"b\"]}]\n" +
-		"key: ENC[-----BEGIN KEY-----\nMIIEv\n-----END KEY-----]\n" +
+		"key: ENC[-----BEGIN KEY-----\\\nMIIEv\\\n-----END KEY-----]\n" +
 		"pw: ENC[ab\\]cd]\n"
 	if err := os.WriteFile(confFile, []byte(original), 0644); err != nil {
 		t.Fatal(err)
@@ -1312,28 +1284,6 @@ func TestEncryptRefusesAPlaintextMarkerThatRunsOverACiphertext(t *testing.T) {
 	after, _ := os.ReadFile(confFile)
 	if !bytes.Equal(after, content) {
 		t.Errorf("nothing should have been written; file is now %q", after)
-	}
-}
-
-// The forgotten-']' shape: encrypt still performs the (ambiguous) encryption,
-// but it must say out loud which lines it just absorbed into the secret.
-func TestEncryptWarnsWhenAPlaintextMarkerSpansLines(t *testing.T) {
-	setupKeyedTempDir(t)
-
-	if err := os.WriteFile("v3.env", []byte("DB_PASSWORD=ENC[hunter2\nALLOWED_HOST=example.com]\nDEBUG=1\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, stderr := captureStdStreams(t, func() {
-		resetRoot(nil)
-		rootCmd.SetArgs([]string{"encrypt", "-i", "v3.env"})
-		if err := rootCmd.Execute(); err != nil {
-			t.Errorf("encrypt: %v", err)
-		}
-	})
-
-	if !contains(stderr, "spans lines 1-2") {
-		t.Errorf("expected a multi-line warning naming the absorbed lines, got %q", stderr)
 	}
 }
 
@@ -1635,7 +1585,7 @@ func TestRunReproducesAMultiLineValueExactly(t *testing.T) {
 	setupKeyedTempDir(t)
 
 	const pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADAN\n-----END PRIVATE KEY-----"
-	if err := os.WriteFile("multi.env", []byte("KEY=ENC["+pem+"]\n"), 0644); err != nil {
+	if err := os.WriteFile("multi.env", []byte("KEY=ENC["+strings.ReplaceAll(pem, "\n", "\\\n")+"]\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	resetRoot(nil)
@@ -1664,7 +1614,7 @@ func TestRunSecretCannotInjectAnEnvVar(t *testing.T) {
 	setupKeyedTempDir(t)
 
 	const secret = "hunter2\nPATH=/tmp/evil"
-	if err := os.WriteFile("inject.env", []byte("PASSWORD=ENC["+secret+"]\n"), 0644); err != nil {
+	if err := os.WriteFile("inject.env", []byte("PASSWORD=ENC["+strings.ReplaceAll(secret, "\n", "\\\n")+"]\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	resetRoot(nil)

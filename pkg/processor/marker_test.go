@@ -133,6 +133,10 @@ func TestScanMarkersCiphertextMode(t *testing.T) {
 
 func TestScanMarkersPlaintextMode(t *testing.T) {
 	const pem = "-----BEGIN KEY-----\nMIIEv\n-----END KEY-----"
+	// A plaintext body ends at the first UNESCAPED newline. A value that really
+	// contains newlines reaches the file as backslash-newline continuations,
+	// which is what escapeMarkerValue emits.
+	contPEM := strings.ReplaceAll(pem, "\n", "\\\n")
 
 	cases := []struct {
 		name    string
@@ -146,9 +150,9 @@ func TestScanMarkersPlaintextMode(t *testing.T) {
 			markers: []wantMarker{{`ENC[{"scopes":["a","b"]}]`, `{"scopes":["a","b"]}`, false}},
 		},
 		{
-			name:    "multi_line_pem",
-			content: "key: ENC[" + pem + "]\nnext: value\n",
-			markers: []wantMarker{{"ENC[" + pem + "]", pem, false}},
+			name:    "multi_line_pem_needs_continuations",
+			content: "key: ENC[" + contPEM + "]\nnext: value\n",
+			markers: []wantMarker{{"ENC[" + contPEM + "]", pem, false}},
 		},
 		{
 			name:    "escaped_close_bracket",
@@ -263,8 +267,8 @@ func TestScanComments(t *testing.T) {
 		},
 		{
 			name:    "hash_on_a_continuation_line_of_a_multi_line_marker",
-			content: "key: ENC[line1\n# not a comment\nline3]\nafter: 1\n",
-			markers: []wantMarker{{"ENC[line1\n# not a comment\nline3]", "line1\n# not a comment\nline3", false}},
+			content: "key: ENC[line1\\\n# not a comment\\\nline3]\nafter: 1\n",
+			markers: []wantMarker{{"ENC[line1\\\n# not a comment\\\nline3]", "line1\n# not a comment\nline3", false}},
 		},
 	}
 
@@ -454,7 +458,7 @@ func TestEscapeMarkerValueShape(t *testing.T) {
 		"ab]cd":    `ab\]cd`,
 		"a[b":      `a\[b`,
 		`a\b`:      `a\\b`,
-		"a\nb":     "a\nb", // newlines are legal inside a plaintext marker
+		"a\nb":     "a\\\nb", // a real newline is escaped as a continuation
 		"[]\\":     `\[\]\\`,
 		"héllo ·":  "héllo ·",
 		"\x00\xff": "\x00\xff",
@@ -672,36 +676,3 @@ func TestCiphertextModeRejectsBackslashBodies(t *testing.T) {
 }
 
 // --- regression: the multi-line heuristic ---
-
-// TestMultiLinePlaintextHeuristic covers the shape the trailing-']' heuristic
-// cannot see. A single forgotten ']' makes the next config line part of the
-// secret; `encrypt` then deletes that line into the ciphertext. Balancing
-// cannot distinguish it from a deliberate multi-line value, so the commands
-// warn with the line range instead of failing.
-func TestMultiLinePlaintextHeuristic(t *testing.T) {
-	cases := []struct {
-		name    string
-		content string
-		want    bool
-	}{
-		{"forgotten_close_absorbs_the_next_line", "DB_PASSWORD=ENC[hunter2\nALLOWED_HOST=example.com]\nDEBUG=1\n", true},
-		{"forgotten_close_absorbs_a_comment", "password: ENC[secret\n# note with ] bracket\nother: 1\n", true},
-		{"deliberate_pem", "key: ENC[-----BEGIN KEY-----\nMIIEv\n-----END KEY-----]\n", true},
-		{"single_line_plaintext", "password: ENC[hunter2]\n", false},
-		{"single_line_ciphertext", "password: ENC[v1:AAA=]\n", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			markers, defects := Scan([]byte(tc.content))
-			if len(defects) != 0 {
-				t.Fatalf("defects: %+v", defects)
-			}
-			if len(markers) != 1 {
-				t.Fatalf("got %d markers, want 1: %+v", len(markers), markers)
-			}
-			if got := MultiLinePlaintext(markers[0]); got != tc.want {
-				t.Errorf("MultiLinePlaintext = %v, want %v (Raw %q)", got, tc.want, markers[0].Raw)
-			}
-		})
-	}
-}

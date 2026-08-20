@@ -1,9 +1,29 @@
 # Plan 01 — Replace the `ENC[...]` regex with a real scanner
 
 **Kind:** security fix (silent plaintext leak + silent value corruption)
-**Status:** proposed
+**Status:** implemented, with one design revision — see below
 **Depends on:** nothing
 **Blocks:** nothing, but should land alone and first
+
+> **Revision after adversarial review.** As written below, this plan let a
+> plaintext body treat newlines as ordinary content so a PEM could be pasted in
+> raw. Review showed that made a forgotten `]` silently destructive — the lines
+> below it were absorbed into the secret and disappeared from the file, with
+> `encrypt` exiting 0 and no defect reported. **A plaintext body now ends at the
+> first unescaped newline**, and a value that really contains newlines is
+> written with a backslash before each one (a continuation). Escape set is
+> therefore `\[`, `\]`, `\\`, backslash-newline, plus the leading `\v` guard for
+> a value beginning `vN:`.
+>
+> The escape is a backslash before a *real* line break, not the two characters
+> `\n` — a single-line JSON service-account key carries literal `\n` in its
+> `private_key` field, and reading those as newlines would corrupt it.
+>
+> Consequence: a raw multi-line paste is now a loud defect rather than a value.
+> The answer for such payloads is plan 05's `envisible set`, which never puts
+> plaintext in the file. The shipped grammar is recorded in
+> [ADR 0001](../adr/0001-enc-marker-grammar.md), which supersedes the Design
+> section below where they disagree.
 
 ---
 
