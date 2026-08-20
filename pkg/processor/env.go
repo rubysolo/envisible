@@ -34,8 +34,7 @@ func ExtractEnv(ctx context.Context, content []byte, dec Decryptor) (map[string]
 // non-blank line that is not a NAME=value assignment. The latter used to be
 // dropped in silence.
 func ExtractEnvWithDefects(ctx context.Context, content []byte, dec Decryptor) (map[string]string, []Defect, error) {
-	markers, defects, regions := scanWithRegions(content)
-	p := &envParser{content: content, markers: markers, regions: regions, dec: dec}
+	p, defects := newEnvParser(content, dec)
 
 	env, lineDefects, err := p.parse(ctx)
 	defects = append(defects, lineDefects...)
@@ -60,6 +59,9 @@ type envParser struct {
 	regionIdx int
 }
 
+// parse walks the file's assignments and resolves each one's value. The walk
+// itself lives in dotenv.go, so `run` and `set` agree byte-for-byte on where an
+// assignment starts and ends.
 func (p *envParser) parse(ctx context.Context) (map[string]string, []Defect, error) {
 	env := make(map[string]string)
 	var (
@@ -67,44 +69,19 @@ func (p *envParser) parse(ctx context.Context) (map[string]string, []Defect, err
 		lastErr error
 	)
 
-	for pos := 0; pos <= len(p.content); {
-		lineStart := pos
-		lineEnd, next := p.logicalLine(lineStart)
-		pos = next
-
-		end := p.commentStart(lineStart, lineEnd)
-		if end == lineEnd {
-			// A CRLF file leaves '\r' as the last byte of every line. It is
-			// line structure, not value: strip it here, once, rather than
-			// letting it ride along on a value that is otherwise untrimmed.
-			end = trimTrailingCR(p.content, lineStart, end)
+	p.walk(func(l dotenvLine) bool {
+		if !l.ok {
+			defects = append(defects, Defect{Offset: l.start, Kind: MalformedEnvLine})
+			return true
 		}
-
-		s, e := trimSpaceRange(p.content, lineStart, end)
-		if s == e {
-			continue
-		}
-		s, e = stripExport(p.content, s, e)
-
-		eq := p.indexAssign(s, e)
-		if eq < 0 {
-			defects = append(defects, Defect{Offset: s, Kind: MalformedEnvLine})
-			continue
-		}
-		ks, ke := trimSpaceRange(p.content, s, eq)
-		key := string(p.content[ks:ke])
-		if !envNamePattern.MatchString(key) {
-			defects = append(defects, Defect{Offset: s, Kind: MalformedEnvLine})
-			continue
-		}
-
-		value, err := p.value(ctx, eq+1, e)
+		value, err := p.value(ctx, l.valueStart, l.valueEnd)
 		if err != nil {
 			lastErr = err
-			continue
+			return true
 		}
-		env[key] = value
-	}
+		env[l.key] = value
+		return true
+	})
 
 	if lastErr != nil {
 		return nil, defects, lastErr
