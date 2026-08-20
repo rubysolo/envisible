@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/rubysolo/envisible/pkg/kms"
 	"github.com/rubysolo/envisible/pkg/processor"
@@ -31,10 +30,12 @@ KMS-backed markers this hits the cloud KMS — once per unique wrapped data key
 		if len(args) > 0 {
 			targetFile = args[0]
 		}
-		content, err := os.ReadFile(targetFile)
+		content, _, err := readTarget(cmd, targetFile)
 		if err != nil {
-			return fmt.Errorf("failed to read file: %w", err)
+			return err
 		}
+		// Messages interpolate the target; stdin has no path to name.
+		name := targetName(targetFile)
 
 		// For v2 structure checks, look up the registered key's modulus size so
 		// we can require the exact wrapped-DK length. If envisible.pub is missing
@@ -62,7 +63,7 @@ KMS-backed markers this hits the cloud KMS — once per unique wrapped data key
 		// or a ciphertext marker truncated at a newline. Both used to be
 		// invisible — the old regex simply didn't match, so `check` passed.
 		for _, d := range defects {
-			ui.Error("%s", describeDefect(targetFile, content, d))
+			ui.Error("%s", describeDefect(name, content, d))
 		}
 
 		for _, m := range markers {
@@ -74,7 +75,7 @@ KMS-backed markers this hits the cloud KMS — once per unique wrapped data key
 				// The irreducibly ambiguous shapes in the grammar. Warnings only:
 				// the marker is going to be encrypted either way, but the author
 				// may have meant more (or less) of the file to be part of it.
-				warnAmbiguousMarker(targetFile, content, m)
+				warnAmbiguousMarker(name, content, m)
 				continue
 			}
 
@@ -92,24 +93,24 @@ KMS-backed markers this hits the cloud KMS — once per unique wrapped data key
 			}
 		}
 
-		if err := defectError(targetFile, content, defects); err != nil {
+		if err := defectError(name, content, defects); err != nil {
 			return err
 		}
 		if unencryptedCount > 0 {
-			return fmt.Errorf("found %d unencrypted values in %s", unencryptedCount, targetFile)
+			return fmt.Errorf("found %d unencrypted values in %s", unencryptedCount, name)
 		}
 		if malformedCount > 0 {
-			return fmt.Errorf("found %d malformed markers in %s", malformedCount, targetFile)
+			return fmt.Errorf("found %d malformed markers in %s", malformedCount, name)
 		}
 		if verificationFailedCount > 0 {
-			return fmt.Errorf("found %d invalid/corrupt values in %s", verificationFailedCount, targetFile)
+			return fmt.Errorf("found %d invalid/corrupt values in %s", verificationFailedCount, name)
 		}
 
 		msg := "All ENC[...] markers in %s look well-formed."
 		if verify {
 			msg = "All ENC[...] markers in %s are encrypted and verified."
 		}
-		ui.Success(msg, targetFile)
+		ui.Success(msg, name)
 		return nil
 	},
 }

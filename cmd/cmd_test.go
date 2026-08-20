@@ -1336,3 +1336,294 @@ func TestEncryptWarnsWhenAPlaintextMarkerSpansLines(t *testing.T) {
 		t.Errorf("expected a multi-line warning naming the absorbed lines, got %q", stderr)
 	}
 }
+
+// --- plan 03: "-" as a stdin target -----------------------------------------
+
+// resetRootWithStdin wires a canned reader onto the root command so tests can
+// drive "-" without a real pipe on the process. Restored to os.Stdin after the
+// test so later cases are unaffected.
+func resetRootWithStdin(t *testing.T, out io.Writer, in string) {
+	t.Helper()
+	resetRoot(out)
+	rootCmd.SetIn(bytes.NewBufferString(in))
+	t.Cleanup(func() { rootCmd.SetIn(os.Stdin) })
+}
+
+// dirEntries lists the names in dir, so a test can assert that a stdin run
+// wrote nothing to the filesystem.
+func dirEntries(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	names := ""
+	for _, e := range entries {
+		names += e.Name() + "\n"
+	}
+	return names
+}
+
+func TestEncryptReadsStdin(t *testing.T) {
+	setupKeyedTempDir(t)
+	before := dirEntries(t, ".")
+
+	out := bytes.NewBufferString("")
+	resetRootWithStdin(t, out, "password: ENC[hello]\n")
+	rootCmd.SetArgs([]string{"encrypt", "-"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt -: %v", err)
+	}
+
+	if !contains(out.String(), "ENC[v1:") {
+		t.Errorf("expected ciphertext on stdout, got %q", out.String())
+	}
+	if contains(out.String(), "hello") {
+		t.Errorf("plaintext leaked into stdout: %q", out.String())
+	}
+	if after := dirEntries(t, "."); after != before {
+		t.Errorf("encrypt - touched the filesystem: before %q after %q", before, after)
+	}
+}
+
+func TestDecryptReadsStdinRoundTrip(t *testing.T) {
+	setupKeyedTempDir(t)
+	plaintext := "password: ENC[hello]\napi: ENC[second-value]\n"
+
+	encrypted := bytes.NewBufferString("")
+	resetRootWithStdin(t, encrypted, plaintext)
+	rootCmd.SetArgs([]string{"encrypt", "-"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt -: %v", err)
+	}
+
+	decrypted := bytes.NewBufferString("")
+	resetRootWithStdin(t, decrypted, encrypted.String())
+	rootCmd.SetArgs([]string{"decrypt", "-"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("decrypt -: %v", err)
+	}
+
+	if decrypted.String() != plaintext {
+		t.Errorf("round trip through stdin mismatch:\n got %q\nwant %q", decrypted.String(), plaintext)
+	}
+}
+
+func TestCheckReadsStdinAndNamesStdin(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	// An unencrypted marker fails, and the message names <stdin>, not "-".
+	resetRootWithStdin(t, nil, "password: ENC[hello]\n")
+	rootCmd.SetArgs([]string{"check", "-"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("check - should fail on an unencrypted marker")
+	}
+	if !contains(err.Error(), "<stdin>") {
+		t.Errorf("check error should name <stdin>; got %v", err)
+	}
+
+	// A real ciphertext passes, and the success line also names <stdin>.
+	ciphertext := bytes.NewBufferString("")
+	resetRootWithStdin(t, ciphertext, "password: ENC[hello]\n")
+	rootCmd.SetArgs([]string{"encrypt", "-"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt -: %v", err)
+	}
+
+	resetRootWithStdin(t, nil, ciphertext.String())
+	rootCmd.SetArgs([]string{"check", "-"})
+	var checkErr error
+	_, stderr := captureStdStreams(t, func() { checkErr = rootCmd.Execute() })
+	if checkErr != nil {
+		t.Fatalf("check - should pass on real ciphertext: %v", checkErr)
+	}
+	if !contains(stderr, "<stdin>") {
+		t.Errorf("check success line should name <stdin>; got %q", stderr)
+	}
+}
+
+// Empty stdin is a legitimate (if boring) input: an empty file is encryptable,
+// so an empty pipe must not be an error here.
+func TestEmptyStdinIsNotAnError(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	out := bytes.NewBufferString("")
+	resetRootWithStdin(t, out, "")
+	rootCmd.SetArgs([]string{"encrypt", "-"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt - on empty stdin: %v", err)
+	}
+	if out.String() != "" {
+		t.Errorf("expected empty output, got %q", out.String())
+	}
+
+	resetRootWithStdin(t, nil, "")
+	rootCmd.SetArgs([]string{"check", "-"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Errorf("check - on empty stdin: %v", err)
+	}
+}
+
+func TestInplaceWithStdinIsRejected(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	for _, args := range [][]string{
+		{"encrypt", "-i", "-"},
+		{"decrypt", "--inplace", "-"},
+	} {
+		resetRootWithStdin(t, nil, "password: ENC[hello]\n")
+		rootCmd.SetArgs(args)
+		err := rootCmd.Execute()
+		if err == nil {
+			t.Fatalf("%v should be rejected", args)
+		}
+		if !contains(err.Error(), "--inplace") {
+			t.Errorf("%v: error should mention --inplace; got %v", args, err)
+		}
+	}
+}
+
+// `-f -` feeds the same variable as a positional "-", so it must behave the
+// same way.
+func TestFileFlagDashBehavesLikePositionalDash(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	out := bytes.NewBufferString("")
+	resetRootWithStdin(t, out, "password: ENC[hello]\n")
+	rootCmd.SetArgs([]string{"-f", "-", "encrypt"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt -f -: %v", err)
+	}
+	if !contains(out.String(), "ENC[v1:") {
+		t.Errorf("expected ciphertext on stdout, got %q", out.String())
+	}
+
+	resetRootWithStdin(t, nil, "password: ENC[hello]\n")
+	rootCmd.SetArgs([]string{"-f", "-", "check"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("check -f - should fail on an unencrypted marker")
+	}
+	if !contains(err.Error(), "<stdin>") {
+		t.Errorf("check -f - should name <stdin>; got %v", err)
+	}
+}
+
+func TestEditRejectsStdin(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	for _, args := range [][]string{
+		{"edit", "-"},
+		{"-f", "-", "edit"},
+	} {
+		resetRootWithStdin(t, nil, "password: ENC[hello]\n")
+		rootCmd.SetArgs(args)
+		err := rootCmd.Execute()
+		if err == nil {
+			t.Fatalf("%v should be rejected", args)
+		}
+		if !contains(err.Error(), "stdin") || !contains(err.Error(), "encrypt -") {
+			t.Errorf("%v: error should explain and point at `encrypt -`; got %v", args, err)
+		}
+	}
+}
+
+func TestRunRejectsStdinEnvFile(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	resetRootWithStdin(t, nil, "SECRET=ENC[hello]\n")
+	rootCmd.SetArgs([]string{"-f", "-", "run", "--", "true"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("run -f - should be rejected")
+	}
+	if !contains(err.Error(), "stdin") {
+		t.Errorf("run -f - error should mention stdin; got %v", err)
+	}
+}
+
+// The TTY refusal goes through the isTerminal seam, so it is exercisable
+// without allocating a pty.
+func TestStdinRefusesATerminal(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	orig := isTerminal
+	isTerminal = func(*os.File) bool { return true }
+	t.Cleanup(func() { isTerminal = orig })
+
+	resetRoot(nil)
+	// An *os.File input is what the seam is consulted about; a buffer never
+	// reaches it.
+	rootCmd.SetIn(os.Stdin)
+	t.Cleanup(func() { rootCmd.SetIn(os.Stdin) })
+	rootCmd.SetArgs([]string{"encrypt", "-"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("encrypt - on a terminal should be refused, not hang")
+	}
+	if !contains(err.Error(), "refusing to read from a terminal") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// The converse of the seam test: a regular *os.File on stdin is not a terminal
+// and must be read normally.
+func TestStdinAcceptsARedirectedFile(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	if err := os.WriteFile("piped.yaml", []byte("password: ENC[hello]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open("piped.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	out := bytes.NewBufferString("")
+	resetRoot(out)
+	rootCmd.SetIn(f)
+	t.Cleanup(func() { rootCmd.SetIn(os.Stdin) })
+	rootCmd.SetArgs([]string{"encrypt", "-"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt - from a redirected file: %v", err)
+	}
+	if !contains(out.String(), "ENC[v1:") {
+		t.Errorf("expected ciphertext on stdout, got %q", out.String())
+	}
+}
+
+// A file literally named "-" becomes unreachable by that name — the universal
+// Unix convention — but "./-" still works.
+func TestFileNamedDashIsReachableViaDotSlash(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	original := []byte("password: ENC[from-the-file]\n")
+	if err := os.WriteFile("-", original, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// "-" reads stdin, and leaves the file named "-" untouched.
+	out := bytes.NewBufferString("")
+	resetRootWithStdin(t, out, "password: ENC[from-stdin]\n")
+	rootCmd.SetArgs([]string{"encrypt", "-"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt -: %v", err)
+	}
+	onDisk, _ := os.ReadFile("-")
+	if !bytes.Equal(onDisk, original) {
+		t.Errorf("the file named - should be untouched; got %q", onDisk)
+	}
+
+	// "./-" reaches the file.
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", "./-"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt -i ./-: %v", err)
+	}
+	onDisk, _ = os.ReadFile("-")
+	if !bytes.Contains(onDisk, []byte("ENC[v1:")) {
+		t.Errorf("./- should have been encrypted in place; got %q", onDisk)
+	}
+}

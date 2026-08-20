@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +19,12 @@ var editCmd = &cobra.Command{
 		targetFile := filePath
 		if len(args) > 0 {
 			targetFile = args[0]
+		}
+
+		// `edit` round-trips a file through an editor; a pipe is neither
+		// seekable nor writable, and there would be nothing to save back to.
+		if targetFile == stdinTarget {
+			return errors.New("edit cannot read from stdin: there is no file to open in an editor — use `envisible encrypt -` to encrypt piped input")
 		}
 
 		// 1. Load keys (need both halves to round-trip)

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +29,12 @@ envisible's own flags (-f, -k) must come before the command; a '--'
 separator is accepted but not required.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// The child process inherits stdin; consuming it to read the env file
+		// would take it away from the command the user is trying to run.
+		if filePath == stdinTarget {
+			return errors.New("run cannot read the env file from stdin: the child command needs stdin — pass a file path, or `envisible decrypt - | ...`")
+		}
+
 		dec, err := loadDecryptor(cmd.Context())
 		if err != nil {
 			return err

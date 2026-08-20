@@ -26,10 +26,11 @@ var encryptCmd = &cobra.Command{
 			return err
 		}
 
-		content, err := os.ReadFile(targetFile)
+		content, isStdin, err := readTarget(cmd, targetFile)
 		if err != nil {
-			return fmt.Errorf("failed to read file: %w", err)
+			return err
 		}
+		name := targetName(targetFile)
 
 		encrypted, defects, err := processor.EncryptContentWithDefects(content, enc)
 		if err != nil {
@@ -37,15 +38,15 @@ var encryptCmd = &cobra.Command{
 		}
 		// Write path: refuse to produce an artifact whose markers don't parse
 		// the way they look. Nothing is written.
-		if err := defectError(targetFile, content, defects); err != nil {
+		if err := defectError(name, content, defects); err != nil {
 			return err
 		}
 		// Parseable but ambiguous shapes. These do not stop the write — both
 		// readings are legal grammar — but the author gets told which lines
 		// just disappeared into a secret.
-		warnAmbiguousMarkers(targetFile, content)
+		warnAmbiguousMarkers(name, content)
 
-		if inplace {
+		if inplace && !isStdin {
 			err = os.WriteFile(targetFile, encrypted, 0644)
 			if err != nil {
 				return fmt.Errorf("failed to write file: %w", err)

@@ -23,10 +23,11 @@ var decryptCmd = &cobra.Command{
 			targetFile = args[0]
 		}
 
-		content, err := os.ReadFile(targetFile)
+		content, isStdin, err := readTarget(cmd, targetFile)
 		if err != nil {
-			return fmt.Errorf("failed to read file: %w", err)
+			return err
 		}
+		name := targetName(targetFile)
 
 		dec, err := loadDecryptor(cmd.Context())
 		if err != nil {
@@ -38,7 +39,7 @@ var decryptCmd = &cobra.Command{
 		}
 
 		decrypted, defects, err := processor.DecryptContentWithDefects(cmd.Context(), content, dec, !stripMarkers)
-		warnDefects(targetFile, content, defects)
+		warnDefects(name, content, defects)
 		if err != nil {
 			if textconv {
 				fmt.Fprint(cmd.OutOrStdout(), string(content))
@@ -47,7 +48,7 @@ var decryptCmd = &cobra.Command{
 			return fmt.Errorf("failed to decrypt content: %w", err)
 		}
 
-		if inplace {
+		if inplace && !isStdin {
 			err = os.WriteFile(targetFile, decrypted, 0644)
 			if err != nil {
 				return fmt.Errorf("failed to write file: %w", err)
