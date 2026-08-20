@@ -1627,3 +1627,69 @@ func TestFileNamedDashIsReachableViaDotSlash(t *testing.T) {
 		t.Errorf("./- should have been encrypted in place; got %q", onDisk)
 	}
 }
+
+// `run` hands the child the exact bytes that were encrypted, newlines and all.
+// fmt.Sprintf("%s=%s", k, v) plus exec is byte-transparent — this asserts it
+// rather than assuming it.
+func TestRunReproducesAMultiLineValueExactly(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	const pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADAN\n-----END PRIVATE KEY-----"
+	if err := os.WriteFile("multi.env", []byte("KEY=ENC["+pem+"]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", "multi.env"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	b := bytes.NewBufferString("")
+	captureStdStreams(t, func() {
+		resetRoot(b)
+		rootCmd.SetArgs([]string{"-f", "multi.env", "run", "--", "printenv", "KEY"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Errorf("run: %v", err)
+		}
+	})
+
+	if got, want := b.String(), pem+"\n"; got != want {
+		t.Errorf("child received %q, want %q", got, want)
+	}
+}
+
+// The injection case end-to-end: a secret whose plaintext contains a newline
+// followed by an assignment must not define that variable in the child.
+func TestRunSecretCannotInjectAnEnvVar(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	const secret = "hunter2\nPATH=/tmp/evil"
+	if err := os.WriteFile("inject.env", []byte("PASSWORD=ENC["+secret+"]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", "inject.env"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	printenv := func(name string) string {
+		t.Helper()
+		b := bytes.NewBufferString("")
+		captureStdStreams(t, func() {
+			resetRoot(b)
+			rootCmd.SetArgs([]string{"-f", "inject.env", "run", "--", "printenv", name})
+			if err := rootCmd.Execute(); err != nil {
+				t.Errorf("run printenv %s: %v", name, err)
+			}
+		})
+		return b.String()
+	}
+
+	if got, want := printenv("PASSWORD"), secret+"\n"; got != want {
+		t.Errorf("PASSWORD = %q, want the whole two-line secret %q", got, want)
+	}
+	if got := printenv("PATH"); contains(got, "/tmp/evil") {
+		t.Errorf("secret content took over PATH: %q", got)
+	}
+}

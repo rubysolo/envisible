@@ -16,6 +16,8 @@ func describeDefect(file string, content []byte, d processor.Defect) string {
 		return fmt.Sprintf("%s:%d:%d: unterminated ENC[ marker (add the closing ']', or escape a literal bracket as '\\[')", file, line, col)
 	case processor.MalformedCiphertext:
 		return fmt.Sprintf("%s:%d:%d: malformed ENC[vN:...] marker — no closing ']' before end of line (ciphertext is base64 and never spans lines)", file, line, col)
+	case processor.MalformedEnvLine:
+		return fmt.Sprintf("%s:%d:%d: skipped: not a NAME=value assignment, so `run` cannot turn it into an environment variable", file, line, col)
 	default:
 		return fmt.Sprintf("%s:%d:%d: %s", file, line, col, d.Kind)
 	}

@@ -46,6 +46,12 @@ const (
 	// the end of the line. Ciphertext is base64 and can never span lines, so a
 	// newline (or EOF) first means the marker is truncated.
 	MalformedCiphertext
+	// MalformedEnvLine is not a marker problem at all: it is a non-blank,
+	// non-comment line that ExtractEnv could not read as a NAME=value
+	// assignment — no '=', or a left-hand side that is not a valid environment
+	// variable name. Only `run` produces it, and only so the line is skipped
+	// out loud instead of silently.
+	MalformedEnvLine
 )
 
 func (k DefectKind) String() string {
@@ -54,13 +60,18 @@ func (k DefectKind) String() string {
 		return "unterminated marker"
 	case MalformedCiphertext:
 		return "malformed ciphertext marker"
+	case MalformedEnvLine:
+		return "malformed .env line"
 	default:
 		return "unknown defect"
 	}
 }
 
-// Defect is a malformed marker token that ScanMarkers could not turn into a
-// Marker. Offset points at the 'E' of the opening ENC[.
+// Defect is something the caller should be told about but that is not worth
+// failing a read path over: a malformed marker token ScanMarkers could not turn
+// into a Marker (Offset points at the 'E' of the opening ENC[), or a .env line
+// ExtractEnv had to skip (Offset points at the first non-blank byte of the
+// line).
 type Defect struct {
 	Offset int
 	Kind   DefectKind
@@ -368,10 +379,20 @@ func CommentRegions(content []byte, markers []Marker) []span {
 // discarded whole — leaving a file with zero markers, zero defects, and a
 // secret nobody is going to encrypt.
 func Scan(content []byte) ([]Marker, []Defect) {
+	markers, defects, _ := scanWithRegions(content)
+	return markers, defects
+}
+
+// scanWithRegions is Scan plus the comment spans it computed on the way. The
+// .env parser in env.go needs them to find where a comment starts on a line,
+// and there is exactly one implementation of that question in the repo
+// (CommentRegions) — this is how a second caller gets at it without asking it
+// again with a different answer.
+func scanWithRegions(content []byte) ([]Marker, []Defect, []span) {
 	all, defects := ScanMarkers(content)
 	regions := CommentRegions(content, all)
 	if len(regions) == 0 {
-		return all, defects
+		return all, defects, regions
 	}
 
 	inComment := func(pos int) bool {
@@ -398,7 +419,7 @@ func Scan(content []byte) ([]Marker, []Defect) {
 			kept = append(kept, d)
 		}
 	}
-	return markers, kept
+	return markers, kept, regions
 }
 
 // LineCol converts a byte offset into 1-based line and column numbers, for

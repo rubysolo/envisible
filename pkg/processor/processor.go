@@ -292,20 +292,6 @@ func DecryptContent(ctx context.Context, content []byte, dec Decryptor, keepMark
 // found outside comments. Read paths (`decrypt`, `run`) warn on them and carry
 // on: a stray ENC[ in a config file must not take down a deploy.
 func DecryptContentWithDefects(ctx context.Context, content []byte, dec Decryptor, keepMarkers bool) ([]byte, []Defect, error) {
-	render := func(_ Marker, plaintext []byte) (string, error) {
-		if keepMarkers {
-			return wrapMarker(escapeMarkerValue(string(plaintext))), nil
-		}
-		return string(plaintext), nil
-	}
-	return decryptContent(ctx, content, dec, render)
-}
-
-// decryptContent is the shared splice loop behind DecryptContent and
-// ExtractEnv. render turns a decrypted marker into its replacement text; an
-// error from render aborts immediately (that is how ExtractEnv refuses
-// multi-line values).
-func decryptContent(ctx context.Context, content []byte, dec Decryptor, render func(Marker, []byte) (string, error)) ([]byte, []Defect, error) {
 	markers, defects := Scan(content)
 
 	var (
@@ -326,9 +312,9 @@ func decryptContent(ctx context.Context, content []byte, dec Decryptor, render f
 			lastErr = err
 			continue
 		}
-		replacement, err := render(m, plaintext)
-		if err != nil {
-			return nil, defects, err
+		replacement := string(plaintext)
+		if keepMarkers {
+			replacement = wrapMarker(escapeMarkerValue(replacement))
 		}
 		out.Write(content[cursor:m.Start])
 		out.WriteString(replacement)
@@ -336,63 +322,4 @@ func decryptContent(ctx context.Context, content []byte, dec Decryptor, render f
 	}
 	out.Write(content[cursor:])
 	return out.Bytes(), defects, lastErr
-}
-
-// ExtractEnv decrypts content and parses it as a .env-style key=value mapping.
-func ExtractEnv(ctx context.Context, content []byte, dec Decryptor) (map[string]string, error) {
-	env, _, err := ExtractEnvWithDefects(ctx, content, dec)
-	return env, err
-}
-
-// ExtractEnvWithDefects is ExtractEnv plus the scanner defects, so `run` can
-// warn about them.
-//
-// Multi-line plaintexts are rejected outright. The .env grammar here is
-// line-oriented, so a decrypted value containing a newline would let secret
-// content inject additional variables into the child environment. Failing loudly
-// is the interim guard until `run` learns a real .env parser.
-func ExtractEnvWithDefects(ctx context.Context, content []byte, dec Decryptor) (map[string]string, []Defect, error) {
-	guard := func(m Marker, plaintext []byte) (string, error) {
-		if bytes.ContainsRune(plaintext, '\n') {
-			return "", fmt.Errorf("%s: multi-line values are not supported by `run` yet", envKeyAt(content, m.Start))
-		}
-		return string(plaintext), nil
-	}
-	decrypted, defects, err := decryptContent(ctx, content, dec, guard)
-	if err != nil {
-		return nil, defects, err
-	}
-
-	env := make(map[string]string)
-	for _, line := range strings.Split(string(decrypted), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			val := strings.TrimSpace(parts[1])
-			val = strings.Trim(val, `"'`)
-			env[key] = val
-		}
-	}
-	return env, defects, nil
-}
-
-// envKeyAt names the variable a marker belongs to, for error messages: the text
-// before the first '=' on the marker's line. Falls back to the whole line
-// prefix when there is no '='.
-func envKeyAt(content []byte, offset int) string {
-	lineStart := bytes.LastIndexByte(content[:offset], '\n') + 1
-	segment := content[lineStart:offset]
-	if i := bytes.IndexByte(segment, '='); i >= 0 {
-		segment = segment[:i]
-	}
-	key := strings.TrimSpace(string(segment))
-	if key == "" {
-		line, _ := LineCol(content, offset)
-		return fmt.Sprintf("line %d", line)
-	}
-	return key
 }
