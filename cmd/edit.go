@@ -85,6 +85,7 @@ var editCmd = &cobra.Command{
 		if err := defectError(targetFile, editedContent, defects); err != nil {
 			return err
 		}
+		warnAmbiguousMarkers(targetFile, editedContent)
 
 		// 6. Write back to original file
 		err = os.WriteFile(targetFile, encrypted, 0644)

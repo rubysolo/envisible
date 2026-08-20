@@ -71,13 +71,10 @@ KMS-backed markers this hits the cloud KMS — once per unique wrapped data key
 			if !m.Encrypted {
 				ui.Warn("Unencrypted value found: %s", fullMatch)
 				unencryptedCount++
-				// The one irreducibly ambiguous shape in the grammar. Warning
-				// only: the marker is going to be encrypted either way, but the
-				// author may have meant the trailing bracket to be part of it.
-				if processor.UnmatchedTrailingBracket(content, m) {
-					line, _ := processor.LineCol(content, m.Start)
-					ui.Warn("plaintext marker at line %d is followed by an unmatched ']' — if it is part of the secret, escape it as '\\]'", line)
-				}
+				// The irreducibly ambiguous shapes in the grammar. Warnings only:
+				// the marker is going to be encrypted either way, but the author
+				// may have meant more (or less) of the file to be part of it.
+				warnAmbiguousMarker(targetFile, content, m)
 				continue
 			}
 

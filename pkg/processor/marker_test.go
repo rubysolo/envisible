@@ -1,6 +1,7 @@
 package processor
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -494,5 +495,213 @@ func TestCommentRegionsRespectMarkerSpans(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(got, ""), "# y") {
 		t.Errorf("a '#' inside a marker must not open a comment")
+	}
+}
+
+// --- regressions: no marker may span another marker's opener ---
+
+// TestScanNeverSwallowsAnotherMarker covers the review findings where a stray
+// or unbalanced 'ENC[' — typically parked in a comment — opened a plaintext
+// body that ran across newlines and absorbed the real markers after it. Because
+// the absorbing marker's Start sat inside a comment, Scan then dropped it, and
+// the swallowed ciphertext became invisible to every command with zero defects
+// reported: `check` passed on a cleartext secret, `run` exported the literal
+// ciphertext, and `kms rotate` reported success having rotated nothing.
+func TestScanNeverSwallowsAnotherMarker(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		markers []wantMarker
+		defects []DefectKind
+	}{
+		{
+			// The comment's ENC[ used to open depth 1, line 2's ENC[ pushed it
+			// to 2, and the two ']' closed it again — one marker starting in a
+			// comment, dropped, taking the real one with it.
+			name:    "comment_opener_then_ambiguous_plaintext",
+			content: "# TODO: wrap this in ENC[\npassword: ENC[ab]cd]\n",
+			markers: []wantMarker{{"ENC[ab]", "ab", false}},
+		},
+		{
+			name:    "comment_opener_then_well_formed_plaintext",
+			content: "# TODO: wrap this in ENC[\npassword: ENC[hunter2]\nargs: ]\n",
+			markers: []wantMarker{{"ENC[hunter2]", "hunter2", false}},
+		},
+		{
+			// "existing encrypted files are unaffected": prose in a comment
+			// must never hide a v1 ciphertext from the rewriters.
+			name:    "comment_opener_with_unbalanced_bracket_over_ciphertext",
+			content: "# old form was ENC[pw[1\npassword: ENC[v1:AAA=]\n# ...and it ended with ]]\n",
+			markers: []wantMarker{{"ENC[v1:AAA=]", "v1:AAA=", true}},
+		},
+		{
+			// The write-path shape: a '[' in one password and the row-1 ']'
+			// ambiguity in another used to balance out into a single marker
+			// spanning all three lines, so `encrypt` spliced the whole region —
+			// including the untouchable api_key ciphertext — into one new
+			// marker. Now the first line is a reported defect and the api_key
+			// ciphertext is scanned as itself.
+			name:    "plaintext_run_on_does_not_absorb_a_ciphertext",
+			content: "password: ENC[p@ss[word]\napi_key: ENC[v1:AAA=]\npw2: ENC[ab]cd]\n",
+			markers: []wantMarker{
+				{"ENC[v1:AAA=]", "v1:AAA=", true},
+				{"ENC[ab]", "ab", false},
+			},
+			defects: []DefectKind{Unterminated},
+		},
+		{
+			name:    "unbalanced_ciphertext_opener_does_not_absorb_the_next_marker",
+			content: "a: ENC[v1:AAA\nb: ENC[v1:BBB=]\n",
+			markers: []wantMarker{{"ENC[v1:BBB=]", "v1:BBB=", true}},
+			defects: []DefectKind{MalformedCiphertext},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			markers, defects := Scan([]byte(tc.content))
+			checkMarkers(t, tc.content, markers, tc.markers)
+			checkDefects(t, defects, tc.defects)
+		})
+	}
+}
+
+// FuzzMarkerSpansNeverContainAnOpener is the invariant behind the fix: whatever
+// the input, a marker's span never contains a second 'ENC[' opener. That is
+// what makes dropping a commented-out marker safe — a discarded span can never
+// have been hiding a real marker.
+func FuzzMarkerSpansNeverContainAnOpener(f *testing.F) {
+	seeds := []string{
+		"# TODO: wrap this in ENC[\npassword: ENC[ab]cd]\n",
+		"# old form was ENC[pw[1\npassword: ENC[v1:AAA=]\n# ended with ]]\n",
+		"password: ENC[p@ss[word]\napi_key: ENC[v1:AAA=]\npw2: ENC[ab]cd]\n",
+		"a: ENC[one] b: ENC[two]\n",
+		"key: ENC[-----BEGIN KEY-----\nMIIEv\n-----END KEY-----]\n",
+		`x: ENC[literal ENC\[inner\] text]`,
+		"ENC[ENC[ENC[",
+		"]]][[[ENC[",
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		content := []byte(s)
+		markers, _ := ScanMarkers(content)
+		for _, m := range markers {
+			if m.Start < 0 || m.End > len(content) || m.Start >= m.End {
+				t.Fatalf("nonsensical span [%d:%d) in %q", m.Start, m.End, s)
+			}
+			body := content[m.Start+len(markerPrefix) : m.End]
+			if i := bytes.Index(body, []byte(markerPrefix)); i >= 0 {
+				t.Fatalf("marker %q swallowed an opener at body offset %d (input %q)",
+					content[m.Start:m.End], i, s)
+			}
+		}
+	})
+}
+
+// --- regressions: a plaintext value that looks like ciphertext ---
+
+// TestEscapeNeutralizesVersionPrefix pins the other half of the safety
+// property. A secret whose plaintext starts "v1:" used to be re-emitted by
+// DecryptContent(keepMarkers) as ENC[v1:secret], which the scanner then read
+// back in ciphertext mode: `edit` reported success while leaving the secret on
+// disk in the clear, and the file no longer decrypted.
+func TestEscapeNeutralizesVersionPrefix(t *testing.T) {
+	values := []string{
+		"v1:s3cr3t-token",
+		"v0:a]b",
+		"v2:",
+		"v37:nested[brackets]",
+		`v1:back\slash`,
+	}
+	for _, v := range values {
+		t.Run(v, func(t *testing.T) {
+			escaped := escapeMarkerValue(v)
+			if IsEncryptedInner(escaped) {
+				t.Fatalf("escaped form %q still looks like a versioned inner", escaped)
+			}
+			if got := unescapeMarkerValue(escaped); got != v {
+				t.Fatalf("unescape(escape(%q)) = %q", v, got)
+			}
+
+			content := []byte("TOKEN: " + wrapMarker(escaped) + "\nNEXT: 1\n")
+			markers, defects := Scan(content)
+			if len(defects) != 0 {
+				t.Fatalf("defects: %+v", defects)
+			}
+			if len(markers) != 1 {
+				t.Fatalf("got %d markers, want 1: %+v", len(markers), markers)
+			}
+			m := markers[0]
+			if m.Encrypted {
+				t.Errorf("escaped %q was misread as ciphertext", v)
+			}
+			if m.Value != v {
+				t.Errorf("Value = %q, want %q", m.Value, v)
+			}
+			if rest := string(content[m.End:]); rest != "\nNEXT: 1\n" {
+				t.Errorf("marker swallowed following text: %q", rest)
+			}
+		})
+	}
+}
+
+// A hand-written marker can still carry a "vN:" body with an escape in it.
+// Standard base64 has no backslash, so that is not ciphertext: read it as
+// plaintext (honoring '\]') instead of stopping mid-value and silently leaving
+// the remainder of the secret in the clear.
+func TestCiphertextModeRejectsBackslashBodies(t *testing.T) {
+	content := []byte(`TOKEN: ENC[v0:a\]b]`)
+	markers, defects := Scan(content)
+	if len(defects) != 0 {
+		t.Fatalf("defects: %+v", defects)
+	}
+	if len(markers) != 1 {
+		t.Fatalf("got %d markers, want 1: %+v", len(markers), markers)
+	}
+	if markers[0].Encrypted {
+		t.Errorf("a body containing '\\' cannot be base64 ciphertext")
+	}
+	if markers[0].Value != "v0:a]b" {
+		t.Errorf("Value = %q, want %q", markers[0].Value, "v0:a]b")
+	}
+	if markers[0].End != len(content) {
+		t.Errorf("marker ended at %d, want %d (mid-value truncation)", markers[0].End, len(content))
+	}
+}
+
+// --- regression: the multi-line heuristic ---
+
+// TestMultiLinePlaintextHeuristic covers the shape the trailing-']' heuristic
+// cannot see. A single forgotten ']' makes the next config line part of the
+// secret; `encrypt` then deletes that line into the ciphertext. Balancing
+// cannot distinguish it from a deliberate multi-line value, so the commands
+// warn with the line range instead of failing.
+func TestMultiLinePlaintextHeuristic(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"forgotten_close_absorbs_the_next_line", "DB_PASSWORD=ENC[hunter2\nALLOWED_HOST=example.com]\nDEBUG=1\n", true},
+		{"forgotten_close_absorbs_a_comment", "password: ENC[secret\n# note with ] bracket\nother: 1\n", true},
+		{"deliberate_pem", "key: ENC[-----BEGIN KEY-----\nMIIEv\n-----END KEY-----]\n", true},
+		{"single_line_plaintext", "password: ENC[hunter2]\n", false},
+		{"single_line_ciphertext", "password: ENC[v1:AAA=]\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			markers, defects := Scan([]byte(tc.content))
+			if len(defects) != 0 {
+				t.Fatalf("defects: %+v", defects)
+			}
+			if len(markers) != 1 {
+				t.Fatalf("got %d markers, want 1: %+v", len(markers), markers)
+			}
+			if got := MultiLinePlaintext(markers[0]); got != tc.want {
+				t.Errorf("MultiLinePlaintext = %v, want %v (Raw %q)", got, tc.want, markers[0].Raw)
+			}
+		})
 	}
 }

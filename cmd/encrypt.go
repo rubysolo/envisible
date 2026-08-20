@@ -40,6 +40,10 @@ var encryptCmd = &cobra.Command{
 		if err := defectError(targetFile, content, defects); err != nil {
 			return err
 		}
+		// Parseable but ambiguous shapes. These do not stop the write — both
+		// readings are legal grammar — but the author gets told which lines
+		// just disappeared into a secret.
+		warnAmbiguousMarkers(targetFile, content)
 
 		if inplace {
 			err = os.WriteFile(targetFile, encrypted, 0644)

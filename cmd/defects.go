@@ -43,3 +43,29 @@ func warnDefects(file string, content []byte, defects []processor.Defect) {
 		ui.Warn("%s", describeDefect(file, content, d))
 	}
 }
+
+// warnAmbiguousMarker reports the shapes the scanner can parse but that a human
+// may not have meant. Neither is a defect — the file parses, and both readings
+// are legal grammar — so these warn and never fail a command.
+func warnAmbiguousMarker(file string, content []byte, m processor.Marker) {
+	if m.Encrypted {
+		return
+	}
+	line, col := processor.LineCol(content, m.Start)
+	if processor.UnmatchedTrailingBracket(content, m) {
+		ui.Warn("%s:%d:%d: plaintext marker is followed by an unmatched ']' — if it is part of the secret, escape it as '\\]'", file, line, col)
+	}
+	if processor.MultiLinePlaintext(m) {
+		endLine, _ := processor.LineCol(content, m.End-1)
+		ui.Warn("%s:%d:%d: plaintext marker spans lines %d-%d and will be encrypted as one multi-line value — if the closing ']' is missing, those lines are about to be absorbed into the secret", file, line, col, line, endLine)
+	}
+}
+
+// warnAmbiguousMarkers runs warnAmbiguousMarker over every effective marker in
+// content. The write paths use it just before producing an artifact.
+func warnAmbiguousMarkers(file string, content []byte) {
+	markers, _ := processor.Scan(content)
+	for _, m := range markers {
+		warnAmbiguousMarker(file, content, m)
+	}
+}

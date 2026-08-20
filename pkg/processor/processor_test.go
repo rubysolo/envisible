@@ -804,3 +804,196 @@ func TestDefectsInCommentsAreNotReported(t *testing.T) {
 		t.Errorf("prose in a comment is not a malformed marker; got %+v", defects)
 	}
 }
+
+// --- review regressions -----------------------------------------------------
+
+// A stray 'ENC[' in prose used to open a plaintext body that ran across the
+// newline, absorbed the real marker below it, and was then dropped whole
+// because its Start was inside a comment. The file came out of Scan with zero
+// markers and zero defects, so `encrypt` was a no-op and `check` passed on a
+// committed cleartext password.
+func TestCommentBracketDoesNotHideTheMarkerBelowIt(t *testing.T) {
+	pub, priv, _ := crypto.GenerateKeypair()
+	ctx := context.Background()
+
+	content := []byte("# TODO: wrap this in ENC[\npassword: ENC[hunter2]\nargs: ]\n")
+
+	encrypted, defects, err := EncryptContentWithDefects(content, NaclEncryptor{PublicKey: pub})
+	if err != nil {
+		t.Fatalf("EncryptContentWithDefects: %v", err)
+	}
+	if len(defects) != 0 {
+		t.Fatalf("prose in a comment is not a defect; got %+v", defects)
+	}
+	if bytes.Contains(encrypted, []byte("hunter2")) {
+		t.Fatalf("the password was left in the clear: %s", encrypted)
+	}
+	if !bytes.Contains(encrypted, []byte("# TODO: wrap this in ENC[")) {
+		t.Errorf("the comment was rewritten: %s", encrypted)
+	}
+	if !bytes.Contains(encrypted, []byte("args: ]")) {
+		t.Errorf("trailing content was disturbed: %s", encrypted)
+	}
+
+	stripped, err := DecryptContent(ctx, encrypted, NaclDecryptor{PrivateKey: priv}, false)
+	if err != nil {
+		t.Fatalf("DecryptContent: %v", err)
+	}
+	if want := "# TODO: wrap this in ENC[\npassword: hunter2\nargs: ]\n"; string(stripped) != want {
+		t.Errorf("round trip = %q, want %q", stripped, want)
+	}
+}
+
+// The same root cause aimed at an already-encrypted file: an unbalanced '[' in
+// a comment used to swallow the ENC[v1:...] below it, so `decrypt` emitted the
+// literal ciphertext, `check` counted zero markers and passed, and `kms rotate`
+// reported success having rotated nothing — after which destroying the old key
+// would have made the value unrecoverable. "Existing encrypted files are
+// unaffected" has to survive prose being added around them.
+func TestCommentBracketDoesNotHideAnExistingCiphertext(t *testing.T) {
+	pub, priv, _ := crypto.GenerateKeypair()
+	ctx := context.Background()
+
+	inner, err := NaclEncryptor{PublicKey: pub}.EncryptValue([]byte("hunter2"))
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+	content := []byte("# old form was ENC[pw[1\npassword: ENC[" + inner + "]\n# ...and it ended with ]]\n")
+
+	markers, defects := Scan(content)
+	if len(defects) != 0 {
+		t.Fatalf("defects: %+v", defects)
+	}
+	if len(markers) != 1 || !markers[0].Encrypted || markers[0].Raw != inner {
+		t.Fatalf("the ciphertext must still be visible to the scanner; got %+v", markers)
+	}
+
+	stripped, err := DecryptContent(ctx, content, NaclDecryptor{PrivateKey: priv}, false)
+	if err != nil {
+		t.Fatalf("DecryptContent: %v", err)
+	}
+	if !bytes.Contains(stripped, []byte("password: hunter2")) {
+		t.Errorf("the ciphertext was not decrypted: %s", stripped)
+	}
+}
+
+// On the write path, a plaintext body that balanced across lines used to splice
+// the whole absorbed region — including a pre-existing ENC[v1:...] — into one
+// new marker: three lines of YAML collapsed to one, and ciphertext bytes moved.
+// It is now a reported defect, so `encrypt` refuses the file.
+func TestEncryptRefusesToAbsorbAnExistingCiphertext(t *testing.T) {
+	pub, _, _ := crypto.GenerateKeypair()
+
+	inner, err := NaclEncryptor{PublicKey: pub}.EncryptValue([]byte("api"))
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+	content := []byte("password: ENC[p@ss[word]\napi_key: ENC[" + inner + "]\npw2: ENC[ab]cd]\n")
+
+	out, defects, err := EncryptContentWithDefects(content, NaclEncryptor{PublicKey: pub})
+	if err != nil {
+		t.Fatalf("EncryptContentWithDefects: %v", err)
+	}
+	if len(defects) != 1 || defects[0].Kind != Unterminated {
+		t.Fatalf("defects = %+v, want one Unterminated", defects)
+	}
+	if line, _ := LineCol(content, defects[0].Offset); line != 1 {
+		t.Errorf("defect reported on line %d, want 1", line)
+	}
+	// Even though the caller must not write this output, not one byte of the
+	// pre-existing ciphertext may have moved, and the line structure stands.
+	if !bytes.Contains(out, []byte("api_key: ENC["+inner+"]")) {
+		t.Errorf("the pre-existing ciphertext was rewritten: %s", out)
+	}
+	if bytes.Count(out, []byte("\n")) != 3 {
+		t.Errorf("line structure collapsed: %s", out)
+	}
+}
+
+// A secret whose plaintext starts with a version prefix used to survive the
+// `edit` round trip as cleartext: DecryptContent(keepMarkers) wrote
+// ENC[v1:s3cr3t-token], the scanner read it back in ciphertext mode, and
+// EncryptContent reported success without touching it — leaving the secret on
+// disk in the clear and the file undecryptable.
+func TestEditRoundTripOfAVersionPrefixedSecret(t *testing.T) {
+	pub, priv, _ := crypto.GenerateKeypair()
+	enc := NaclEncryptor{PublicKey: pub}
+	dec := NaclDecryptor{PrivateKey: priv}
+	ctx := context.Background()
+
+	for _, secret := range []string{"v1:s3cr3t-token", "v0:a]b"} {
+		t.Run(secret, func(t *testing.T) {
+			original := []byte("TOKEN: " + wrapMarker(escapeMarkerValue(secret)) + "\n")
+
+			encrypted, defects, err := EncryptContentWithDefects(original, enc)
+			if err != nil {
+				t.Fatalf("EncryptContentWithDefects: %v", err)
+			}
+			if len(defects) != 0 {
+				t.Fatalf("defects: %+v", defects)
+			}
+			if bytes.Contains(encrypted, []byte(secret)) {
+				t.Fatalf("the secret is still in the file as plaintext: %s", encrypted)
+			}
+
+			// What `edit` puts in the temp file, then writes back.
+			editable, err := DecryptContent(ctx, encrypted, dec, true)
+			if err != nil {
+				t.Fatalf("DecryptContent(keepMarkers): %v", err)
+			}
+			if !bytes.Equal(editable, original) {
+				t.Fatalf("editable buffer drifted: %q, want %q", editable, original)
+			}
+			markers, defects := Scan(editable)
+			if len(defects) != 0 || len(markers) != 1 {
+				t.Fatalf("rescan: markers %+v defects %+v", markers, defects)
+			}
+			if markers[0].Encrypted {
+				t.Fatalf("the plaintext was re-read as ciphertext: %+v", markers[0])
+			}
+
+			reencrypted, _, err := EncryptContentWithDefects(editable, enc)
+			if err != nil {
+				t.Fatalf("re-encrypt: %v", err)
+			}
+			if bytes.Contains(reencrypted, []byte(secret)) {
+				t.Fatalf("re-encrypt left the secret in the clear: %s", reencrypted)
+			}
+
+			stripped, err := DecryptContent(ctx, reencrypted, dec, false)
+			if err != nil {
+				t.Fatalf("final decrypt: %v", err)
+			}
+			if want := "TOKEN: " + secret + "\n"; string(stripped) != want {
+				t.Errorf("final plaintext = %q, want %q", stripped, want)
+			}
+		})
+	}
+}
+
+// A forgotten ']' makes the following config line part of the secret, and
+// balancing cannot tell that from a deliberate two-line value. The scanner
+// still reads it as one marker — but it is flagged, so the write paths warn
+// with the line range before the absorbed line disappears into the ciphertext.
+func TestMultiLinePlaintextIsFlaggedForTheWritePaths(t *testing.T) {
+	content := []byte("DB_PASSWORD=ENC[hunter2\nALLOWED_HOST=example.com]\nDEBUG=1\n")
+
+	markers, defects := Scan(content)
+	if len(defects) != 0 {
+		t.Fatalf("defects: %+v", defects)
+	}
+	if len(markers) != 1 {
+		t.Fatalf("got %d markers, want 1: %+v", len(markers), markers)
+	}
+	if markers[0].Value != "hunter2\nALLOWED_HOST=example.com" {
+		t.Fatalf("unexpected value %q", markers[0].Value)
+	}
+	if !MultiLinePlaintext(markers[0]) {
+		t.Errorf("a plaintext marker that absorbed the next line must be flagged")
+	}
+	startLine, _ := LineCol(content, markers[0].Start)
+	endLine, _ := LineCol(content, markers[0].End-1)
+	if startLine != 1 || endLine != 2 {
+		t.Errorf("warning would name lines %d-%d, want 1-2", startLine, endLine)
+	}
+}

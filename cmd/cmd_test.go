@@ -1200,3 +1200,139 @@ func TestEncryptDecryptRoundTripsBracketsAndMultiLineValues(t *testing.T) {
 		t.Errorf("edit round trip lost data.\ngot:\n%q\nwant:\n%q", b.String(), wantPlain)
 	}
 }
+
+// --- review regressions -----------------------------------------------------
+
+// The pre-commit hook's job: a cleartext password below a line of prose that
+// happens to contain "ENC[" must still be reported. The stray opener used to
+// swallow the real marker, and because it was itself commented out the whole
+// span was discarded — check counted zero markers and exited 0.
+func TestCheckFailsWhenACommentBracketPrecedesACleartextSecret(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	rows := map[string]string{
+		"ambiguous_victim":   "# TODO: wrap this in ENC[\npassword: ENC[ab]cd]\n",
+		"well_formed_victim": "# TODO: wrap this in ENC[\npassword: ENC[hunter2]\nargs: ]\n",
+	}
+	for name, content := range rows {
+		t.Run(name, func(t *testing.T) {
+			confFile := name + ".yaml"
+			if err := os.WriteFile(confFile, []byte(content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			resetRoot(nil)
+			rootCmd.SetArgs([]string{"check", confFile})
+			if err := rootCmd.Execute(); err == nil {
+				t.Errorf("check passed on a cleartext secret in %q", content)
+			}
+
+			resetRoot(nil)
+			rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
+			if err := rootCmd.Execute(); err != nil {
+				t.Fatalf("encrypt: %v", err)
+			}
+			after, _ := os.ReadFile(confFile)
+			if bytes.Contains(after, []byte("hunter2")) || bytes.Contains(after, []byte("ENC[ab]")) {
+				t.Errorf("encrypt was a no-op on the real marker: %s", after)
+			}
+		})
+	}
+}
+
+// Adding prose around an already-encrypted value must not hide it: decrypt used
+// to emit the literal ciphertext and check used to pass with zero markers.
+func TestEncryptedValueStaysVisibleUnderProseWithABracket(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	confFile := "prose-bracket.yaml"
+	if err := os.WriteFile(confFile, []byte("password: ENC[hunter2]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	encrypted, _ := os.ReadFile(confFile)
+	withProse := append([]byte("# old form was ENC[pw[1\n"), encrypted...)
+	withProse = append(withProse, []byte("# ...and it ended with ]]\n")...)
+	if err := os.WriteFile(confFile, withProse, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"check", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Errorf("check should still see a healthy ciphertext: %v", err)
+	}
+
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"decrypt", "--strip", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("decrypt: %v", err)
+	}
+	if !contains(b.String(), "password: hunter2") {
+		t.Errorf("the ciphertext was invisible to decrypt: %q", b.String())
+	}
+}
+
+// A plaintext body that balances across lines used to be spliced into a single
+// new marker, collapsing the file and moving pre-existing ciphertext bytes.
+// encrypt must refuse and leave the file alone.
+func TestEncryptRefusesAPlaintextMarkerThatRunsOverACiphertext(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	confFile := "runon.yaml"
+	if err := os.WriteFile(confFile, []byte("api_key: ENC[api]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	ciphertextLine, _ := os.ReadFile(confFile)
+
+	content := append([]byte("password: ENC[p@ss[word]\n"), ciphertextLine...)
+	content = append(content, []byte("pw2: ENC[ab]cd]\n")...)
+	if err := os.WriteFile(confFile, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("encrypt must refuse a plaintext marker that runs over a ciphertext")
+	}
+	if !contains(err.Error(), "runon.yaml:1:11") {
+		t.Errorf("error should point at the run-on marker; got %v", err)
+	}
+	after, _ := os.ReadFile(confFile)
+	if !bytes.Equal(after, content) {
+		t.Errorf("nothing should have been written; file is now %q", after)
+	}
+}
+
+// The forgotten-']' shape: encrypt still performs the (ambiguous) encryption,
+// but it must say out loud which lines it just absorbed into the secret.
+func TestEncryptWarnsWhenAPlaintextMarkerSpansLines(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	if err := os.WriteFile("v3.env", []byte("DB_PASSWORD=ENC[hunter2\nALLOWED_HOST=example.com]\nDEBUG=1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr := captureStdStreams(t, func() {
+		resetRoot(nil)
+		rootCmd.SetArgs([]string{"encrypt", "-i", "v3.env"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Errorf("encrypt: %v", err)
+		}
+	})
+
+	if !contains(stderr, "spans lines 1-2") {
+		t.Errorf("expected a multi-line warning naming the absorbed lines, got %q", stderr)
+	}
+}

@@ -13,6 +13,14 @@ const markerPrefix = "ENC["
 // markerSuffix closes every marker.
 const markerSuffix = "]"
 
+// markerPrefixBytes is markerPrefix as a slice, for scanning.
+var markerPrefixBytes = []byte(markerPrefix)
+
+// opensMarkerAt reports whether the literal "ENC[" begins at content[j].
+func opensMarkerAt(content []byte, j int) bool {
+	return bytes.HasPrefix(content[j:], markerPrefixBytes)
+}
+
 // wrapMarker builds the on-disk form of a marker from an already-prepared
 // inner string (ciphertext, or an escaped plaintext).
 func wrapMarker(inner string) string {
@@ -80,6 +88,11 @@ type span struct{ start, end int }
 // Plaintext mode tracks bracket depth so a pasted JSON blob needs no escaping,
 // honors '\[', '\]' and '\\' escapes, and allows newlines so multi-line values
 // (PEM keys, service-account JSON) are expressible at all.
+//
+// Both modes stop at an unescaped, nested "ENC[": no marker span ever contains
+// another marker's opener. That invariant is what makes the comment filtering
+// in Scan safe — a span that gets discarded can never have been hiding a real
+// marker — and it bounds the damage of a forgotten ']'.
 func ScanMarkers(content []byte) ([]Marker, []Defect) {
 	var (
 		markers []Marker
@@ -94,22 +107,27 @@ func ScanMarkers(content []byte) ([]Marker, []Defect) {
 		inner := start + len(markerPrefix)
 
 		if isCiphertextStart(content[inner:]) {
-			closeIdx, ok := scanCiphertextBody(content, inner)
-			if !ok {
+			closeIdx, status := scanCiphertextBody(content, inner)
+			switch status {
+			case bodyClosed:
+				raw := string(content[inner:closeIdx])
+				markers = append(markers, Marker{
+					Start:     start,
+					End:       closeIdx + 1,
+					Raw:       raw,
+					Value:     raw,
+					Encrypted: true,
+				})
+				i = closeIdx + 1
+				continue
+			case bodyTruncated:
 				defects = append(defects, Defect{Offset: start, Kind: MalformedCiphertext})
 				i = inner
 				continue
 			}
-			raw := string(content[inner:closeIdx])
-			markers = append(markers, Marker{
-				Start:     start,
-				End:       closeIdx + 1,
-				Raw:       raw,
-				Value:     raw,
-				Encrypted: true,
-			})
-			i = closeIdx + 1
-			continue
+			// bodyNotCiphertext: the body holds a byte no base64 payload can
+			// contain, so this is not a ciphertext marker after all. Fall
+			// through and read it as plaintext, where escapes are honored.
 		}
 
 		closeIdx, ok := scanPlaintextBody(content, inner)
@@ -144,18 +162,45 @@ func isCiphertextStart(b []byte) bool {
 	return i > 1 && i < len(b) && b[i] == ':'
 }
 
+// bodyStatus is the outcome of scanning a ciphertext marker body.
+type bodyStatus int
+
+const (
+	// bodyClosed: a ']' terminated the body on the same line.
+	bodyClosed bodyStatus = iota
+	// bodyTruncated: the line (or the input) ended, or another marker opened,
+	// before the ']' arrived. The marker is malformed.
+	bodyTruncated
+	// bodyNotCiphertext: the body contains a byte that standard base64 cannot
+	// produce, so despite the vN: prefix this is not ciphertext. The caller
+	// re-reads it in plaintext mode.
+	bodyNotCiphertext
+)
+
 // scanCiphertextBody returns the index of the closing ']' for a ciphertext
 // marker whose body starts at inner. A newline or EOF first means truncation.
-func scanCiphertextBody(content []byte, inner int) (int, bool) {
+//
+// A backslash means it is not ciphertext at all: v1 and v2 inners are a version
+// prefix plus standard base64, an alphabet with no '\'. The only way one gets
+// there is a plaintext value that happens to start "vN:" — which escapeMarkerValue
+// now neutralizes on the way out, but a hand-written file can still contain.
+// Reading it as plaintext honors '\]' instead of stopping mid-value.
+func scanCiphertextBody(content []byte, inner int) (int, bodyStatus) {
 	for j := inner; j < len(content); j++ {
+		if opensMarkerAt(content, j) {
+			// No marker may span another marker's opener. See scanPlaintextBody.
+			return 0, bodyTruncated
+		}
 		switch content[j] {
 		case ']':
-			return j, true
+			return j, bodyClosed
 		case '\n':
-			return 0, false
+			return 0, bodyTruncated
+		case '\\':
+			return 0, bodyNotCiphertext
 		}
 	}
-	return 0, false
+	return 0, bodyTruncated
 }
 
 // scanPlaintextBody returns the index of the closing ']' for a plaintext marker
@@ -164,6 +209,20 @@ func scanCiphertextBody(content []byte, inner int) (int, bool) {
 func scanPlaintextBody(content []byte, inner int) (int, bool) {
 	depth := 1
 	for j := inner; j < len(content); j++ {
+		if opensMarkerAt(content, j) {
+			// An unescaped ENC[ inside a body means this body never closed:
+			// the author forgot a ']', or left a stray bracket in prose. Bail
+			// out rather than absorb the next marker.
+			//
+			// This is the invariant that keeps the grammar safe across lines:
+			// no marker span ever contains another marker's opener. Without it
+			// a lone 'ENC[' in a comment can swallow the real ENC[v1:...] that
+			// follows, and because the swallowing marker is itself discarded as
+			// commented-out, the ciphertext becomes invisible to every command
+			// with no defect reported. Anything envisible writes escapes '[' as
+			// '\[', so a machine-written value never trips this.
+			return 0, false
+		}
 		switch content[j] {
 		case '\\':
 			if j+1 < len(content) {
@@ -185,19 +244,30 @@ func scanPlaintextBody(content []byte, inner int) (int, bool) {
 }
 
 // escapeMarkerValue renders a plaintext value so it can be written inside a
-// marker unambiguously: '\' -> '\\', '[' -> '\[', ']' -> '\]'.
+// marker unambiguously: '\' -> '\\', '[' -> '\[', ']' -> '\]', plus a leading
+// '\' in front of a value that itself begins with a version prefix.
 //
 // Escaping '[' as well as ']' is what makes machine-written markers safe. An
 // unescaped '[' would push bracket depth to 2 and swallow the rest of the file;
 // with both escaped, anything envisible emits has depth that never exceeds 1.
 // Bracket balancing in the scanner exists purely so a human pasting a JSON blob
 // does not have to escape anything.
+//
+// The leading-'v' case is the same class of bug one level up: a secret whose
+// plaintext looks like "v1:..." would be re-read in ciphertext mode, so the
+// `edit` round trip would write it back to disk in the clear (and report
+// success). Prefixing the escape moves it out of ciphertext mode; the scanner
+// puts the 'v' back.
 func escapeMarkerValue(s string) string {
-	if !strings.ContainsAny(s, `\[]`) {
+	looksVersioned := IsEncryptedInner(s)
+	if !looksVersioned && !strings.ContainsAny(s, `\[]`) {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s) + 8)
+	if looksVersioned {
+		b.WriteByte('\\')
+	}
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case '\\', '[', ']':
@@ -209,7 +279,11 @@ func escapeMarkerValue(s string) string {
 }
 
 // unescapeMarkerValue is the exact inverse of escapeMarkerValue. A backslash
-// followed by anything other than '\', '[' or ']' is a literal backslash.
+// followed by anything other than '\', '[' or ']' is a literal backslash — with
+// one position-scoped exception: a leading "\v" in front of a version prefix,
+// which is how escapeMarkerValue keeps a plaintext "v1:..." out of ciphertext
+// mode. Restricting that escape to offset 0 keeps every other "\v" in the value
+// (a Windows path, a JSON blob) byte-for-byte intact.
 func unescapeMarkerValue(s string) string {
 	if !strings.Contains(s, `\`) {
 		return s
@@ -223,6 +297,12 @@ func unescapeMarkerValue(s string) string {
 				b.WriteByte(s[i+1])
 				i++
 				continue
+			case 'v':
+				if i == 0 && IsEncryptedInner(s[1:]) {
+					b.WriteByte('v')
+					i++
+					continue
+				}
 			}
 		}
 		b.WriteByte(s[i])
@@ -281,6 +361,12 @@ func CommentRegions(content []byte, markers []Marker) []span {
 // against those spans, then filter — is what makes multi-line markers and
 // comment skipping coexist. Dropping defects inside comments matters too: a
 // "# TODO: wrap this in ENC[" is prose, not a broken marker.
+//
+// Dropping a marker here is only safe because of ScanMarkers' no-nested-opener
+// invariant. Without it, that same "# TODO: wrap this in ENC[" opens a body
+// that runs across the newline, absorbs the real marker below it, and is then
+// discarded whole — leaving a file with zero markers, zero defects, and a
+// secret nobody is going to encrypt.
 func Scan(content []byte) ([]Marker, []Defect) {
 	all, defects := ScanMarkers(content)
 	regions := CommentRegions(content, all)
@@ -359,4 +445,23 @@ func UnmatchedTrailingBracket(content []byte, m Marker) bool {
 		}
 	}
 	return false
+}
+
+// MultiLinePlaintext reports whether a plaintext marker's body crosses a
+// newline.
+//
+// Multi-line plaintext is a supported value shape — a PEM key or a pasted
+// service-account JSON has to be expressible — so this is not a defect. It is
+// the second heuristic in the grammar, and it covers the shape the trailing-']'
+// heuristic cannot see:
+//
+//	DB_PASSWORD=ENC[hunter2
+//	ALLOWED_HOST=example.com]
+//
+// A single forgotten ']' turns the next config line into part of the secret,
+// and bracket balancing has no way to tell that from a deliberate two-line
+// value. Encrypting it deletes the absorbed line from the file, so the write
+// paths warn with the line range before doing it.
+func MultiLinePlaintext(m Marker) bool {
+	return !m.Encrypted && strings.Contains(m.Raw, "\n")
 }
