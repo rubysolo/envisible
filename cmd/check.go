@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"regexp"
 
 	"github.com/rubysolo/envisible/pkg/kms"
 	"github.com/rubysolo/envisible/pkg/processor"
@@ -46,8 +45,7 @@ KMS-backed markers this hits the cloud KMS — once per unique wrapped data key
 			v2WrappedSize = info.PubKey.Size()
 		}
 
-		encRegex := regexp.MustCompile(`ENC\[(.*?)\]`)
-		matches := encRegex.FindAllSubmatch(content, -1)
+		markers, defects := processor.Scan(content)
 		unencryptedCount := 0
 		malformedCount := 0
 		verificationFailedCount := 0
@@ -60,30 +58,46 @@ KMS-backed markers this hits the cloud KMS — once per unique wrapped data key
 			}
 		}
 
-		for _, match := range matches {
-			fullMatch := string(match[0])
-			inner := string(match[1])
+		// Tokens the scanner could not parse at all: an ENC[ that never closes,
+		// or a ciphertext marker truncated at a newline. Both used to be
+		// invisible — the old regex simply didn't match, so `check` passed.
+		for _, d := range defects {
+			ui.Error("%s", describeDefect(targetFile, content, d))
+		}
 
-			if !processor.IsEncryptedInner(inner) {
+		for _, m := range markers {
+			fullMatch := string(content[m.Start:m.End])
+
+			if !m.Encrypted {
 				ui.Warn("Unencrypted value found: %s", fullMatch)
 				unencryptedCount++
+				// The one irreducibly ambiguous shape in the grammar. Warning
+				// only: the marker is going to be encrypted either way, but the
+				// author may have meant the trailing bracket to be part of it.
+				if processor.UnmatchedTrailingBracket(content, m) {
+					line, _ := processor.LineCol(content, m.Start)
+					ui.Warn("plaintext marker at line %d is followed by an unmatched ']' — if it is part of the secret, escape it as '\\]'", line)
+				}
 				continue
 			}
 
-			if err := processor.StructureCheck(inner, v2WrappedSize); err != nil {
+			if err := processor.StructureCheck(m.Raw, v2WrappedSize); err != nil {
 				ui.Error("Malformed marker %s: %v", fullMatch, err)
 				malformedCount++
 				continue
 			}
 
 			if verify {
-				if _, err := dec.DecryptMarker(cmd.Context(), inner); err != nil {
+				if _, err := dec.DecryptMarker(cmd.Context(), m.Raw); err != nil {
 					ui.Error("Verification failed for %s: %v", fullMatch, err)
 					verificationFailedCount++
 				}
 			}
 		}
 
+		if err := defectError(targetFile, content, defects); err != nil {
+			return err
+		}
 		if unencryptedCount > 0 {
 			return fmt.Errorf("found %d unencrypted values in %s", unencryptedCount, targetFile)
 		}

@@ -485,3 +485,322 @@ func TestCompositeFallsThroughOnSkip(t *testing.T) {
 		t.Errorf("expected ErrSkip, got %v", err)
 	}
 }
+
+// --- evidence table from docs/plans/01-marker-scanner.md ---
+//
+// Each of these inputs used to be silently truncated, silently corrupted, or a
+// silent no-op that `envisible check` reported as clean. They now either
+// round-trip exactly or produce a loud defect.
+
+// Row 1: `password: ENC[ab]cd]`. The bracket is genuinely ambiguous, so the two
+// halves of the fix are (a) the documented escape round-trips exactly, and
+// (b) the unescaped form is flagged rather than passing silently.
+func TestEvidenceRowTrailingBracket(t *testing.T) {
+	pub, priv, _ := crypto.GenerateKeypair()
+	enc := NaclEncryptor{PublicKey: pub}
+	dec := NaclDecryptor{PrivateKey: priv}
+	ctx := context.Background()
+
+	// (a) Escaped: the whole value is encrypted, nothing is left in the clear.
+	escaped := []byte(`password: ENC[ab\]cd]`)
+	encrypted, defects, err := EncryptContentWithDefects(escaped, enc)
+	if err != nil {
+		t.Fatalf("EncryptContentWithDefects: %v", err)
+	}
+	if len(defects) != 0 {
+		t.Fatalf("unexpected defects: %+v", defects)
+	}
+	if bytes.Contains(encrypted, []byte("cd")) {
+		t.Errorf("part of the secret stayed in the file as plaintext: %s", encrypted)
+	}
+	stripped, err := DecryptContent(ctx, encrypted, dec, false)
+	if err != nil {
+		t.Fatalf("DecryptContent: %v", err)
+	}
+	if string(stripped) != "password: ab]cd" {
+		t.Errorf("round trip = %q, want %q", stripped, "password: ab]cd")
+	}
+
+	// (b) Unescaped: the scanner reads "ab" (unavoidable), but the trailing
+	// unmatched bracket is detectable so `check` can warn about it.
+	ambiguous := []byte("password: ENC[ab]cd]")
+	markers, _ := Scan(ambiguous)
+	if len(markers) != 1 || markers[0].Value != "ab" {
+		t.Fatalf("markers = %+v, want a single marker with Value \"ab\"", markers)
+	}
+	if !UnmatchedTrailingBracket(ambiguous, markers[0]) {
+		t.Errorf("the ambiguous form must be flagged by the heuristic")
+	}
+}
+
+// Row 2: `sa: ENC[{"scopes":["a","b"]}]` used to lose the ']' that closed the
+// JSON array. Bracket balancing keeps the value intact.
+func TestEvidenceRowBracketedStructure(t *testing.T) {
+	pub, priv, _ := crypto.GenerateKeypair()
+	ctx := context.Background()
+
+	const value = `{"scopes":["a","b"]}`
+	content := []byte(`sa: ENC[` + value + `]`)
+
+	encrypted, defects, err := EncryptContentWithDefects(content, NaclEncryptor{PublicKey: pub})
+	if err != nil {
+		t.Fatalf("EncryptContentWithDefects: %v", err)
+	}
+	if len(defects) != 0 {
+		t.Fatalf("unexpected defects: %+v", defects)
+	}
+	if bytes.Contains(encrypted, []byte("scopes")) {
+		t.Errorf("plaintext survived encryption: %s", encrypted)
+	}
+
+	stripped, err := DecryptContent(ctx, encrypted, NaclDecryptor{PrivateKey: priv}, false)
+	if err != nil {
+		t.Fatalf("DecryptContent: %v", err)
+	}
+	if string(stripped) != "sa: "+value {
+		t.Errorf("value was corrupted.\ngot:  %s\nwant: %s", stripped, "sa: "+value)
+	}
+}
+
+// Row 3: a multi-line PEM used to be a total no-op — the file was written back
+// with the private key still in the clear.
+func TestEvidenceRowMultiLineValue(t *testing.T) {
+	pub, priv, _ := crypto.GenerateKeypair()
+	ctx := context.Background()
+
+	const pem = "-----BEGIN KEY-----\nMIIEv\n-----END KEY-----"
+	content := []byte("key: ENC[" + pem + "]\nother: plain\n")
+
+	encrypted, defects, err := EncryptContentWithDefects(content, NaclEncryptor{PublicKey: pub})
+	if err != nil {
+		t.Fatalf("EncryptContentWithDefects: %v", err)
+	}
+	if len(defects) != 0 {
+		t.Fatalf("unexpected defects: %+v", defects)
+	}
+	if bytes.Contains(encrypted, []byte("MIIEv")) {
+		t.Errorf("multi-line plaintext was left in the file: %s", encrypted)
+	}
+	if !bytes.Contains(encrypted, []byte("other: plain")) {
+		t.Errorf("surrounding content was disturbed: %s", encrypted)
+	}
+	if bytes.Count(encrypted, []byte("\n")) != 2 {
+		t.Errorf("ciphertext must occupy a single line; got: %s", encrypted)
+	}
+
+	decrypted, err := DecryptContent(ctx, encrypted, NaclDecryptor{PrivateKey: priv}, true)
+	if err != nil {
+		t.Fatalf("DecryptContent: %v", err)
+	}
+	if !bytes.Equal(decrypted, content) {
+		t.Errorf("multi-line round trip failed.\ngot:\n%s\nwant:\n%s", decrypted, content)
+	}
+}
+
+// Row 4: `key: ENC[oops-no-close` used to match nothing at all, so encrypt
+// reported success and check passed. It is now a reported defect.
+func TestEvidenceRowUnterminatedMarker(t *testing.T) {
+	pub, _, _ := crypto.GenerateKeypair()
+	content := []byte("key: ENC[oops-no-close\n")
+
+	out, defects, err := EncryptContentWithDefects(content, NaclEncryptor{PublicKey: pub})
+	if err != nil {
+		t.Fatalf("EncryptContentWithDefects: %v", err)
+	}
+	if len(defects) != 1 || defects[0].Kind != Unterminated {
+		t.Fatalf("defects = %+v, want one Unterminated", defects)
+	}
+	if line, col := LineCol(content, defects[0].Offset); line != 1 || col != 6 {
+		t.Errorf("defect located at %d:%d, want 1:6", line, col)
+	}
+	if !bytes.Equal(out, content) {
+		t.Errorf("content should be untouched when nothing parses; got %s", out)
+	}
+}
+
+// Row 5: the case that already worked. It must not regress.
+func TestEvidenceRowTwoMarkersOneLine(t *testing.T) {
+	pub, priv, _ := crypto.GenerateKeypair()
+	ctx := context.Background()
+
+	content := []byte("a: ENC[one] b: ENC[two]")
+	encrypted, defects, err := EncryptContentWithDefects(content, NaclEncryptor{PublicKey: pub})
+	if err != nil {
+		t.Fatalf("EncryptContentWithDefects: %v", err)
+	}
+	if len(defects) != 0 {
+		t.Fatalf("unexpected defects: %+v", defects)
+	}
+	if n := bytes.Count(encrypted, []byte("ENC[v1:")); n != 2 {
+		t.Errorf("expected 2 encrypted markers, got %d: %s", n, encrypted)
+	}
+
+	stripped, err := DecryptContent(ctx, encrypted, NaclDecryptor{PrivateKey: priv}, false)
+	if err != nil {
+		t.Fatalf("DecryptContent: %v", err)
+	}
+	if string(stripped) != "a: one b: two" {
+		t.Errorf("round trip = %q, want %q", stripped, "a: one b: two")
+	}
+}
+
+// TestEditRoundTripPreservesBracketsAndNewlines is the `envisible edit` shape:
+// encrypt, decrypt with markers kept, re-encrypt the edited buffer, decrypt
+// again. DecryptContent(keepMarkers) re-escapes, so a value full of brackets,
+// backslashes and newlines survives an arbitrary number of laps.
+func TestEditRoundTripPreservesBracketsAndNewlines(t *testing.T) {
+	pub, priv, _ := crypto.GenerateKeypair()
+	enc := NaclEncryptor{PublicKey: pub}
+	dec := NaclDecryptor{PrivateKey: priv}
+	ctx := context.Background()
+
+	value := "a]b[c\\d\ne]f"
+	original := []byte("secret: ENC[" + escapeMarkerValue(value) + "]\ntrailing: 1\n")
+
+	encrypted, err := EncryptContent(original, enc)
+	if err != nil {
+		t.Fatalf("EncryptContent: %v", err)
+	}
+
+	for lap := 0; lap < 3; lap++ {
+		// What `edit` puts in the temp file.
+		editable, err := DecryptContent(ctx, encrypted, dec, true)
+		if err != nil {
+			t.Fatalf("lap %d: DecryptContent: %v", lap, err)
+		}
+		if !bytes.Equal(editable, original) {
+			t.Fatalf("lap %d: editable buffer drifted.\ngot:  %q\nwant: %q", lap, editable, original)
+		}
+		// What `edit` writes back.
+		encrypted, err = EncryptContent(editable, enc)
+		if err != nil {
+			t.Fatalf("lap %d: re-encrypt: %v", lap, err)
+		}
+	}
+
+	stripped, err := DecryptContent(ctx, encrypted, dec, false)
+	if err != nil {
+		t.Fatalf("DecryptContent(strip): %v", err)
+	}
+	want := "secret: " + value + "\ntrailing: 1\n"
+	if string(stripped) != want {
+		t.Errorf("final plaintext = %q, want %q", stripped, want)
+	}
+}
+
+func TestRewrapContentSkipsCiphertextInComments(t *testing.T) {
+	oldPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey (old): %v", err)
+	}
+	newPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey (new): %v", err)
+	}
+	oldWrapper := newRSAWrapperForTest(&oldPriv.PublicKey)
+	newWrapper := newRSAWrapperForTest(&newPriv.PublicKey)
+	oldUnwrapper := &localRSAUnwrapper{priv: oldPriv}
+
+	enc := NewEnvelopeEncryptor(oldWrapper)
+	live, err := enc.EncryptValue([]byte("live"))
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+	stale, err := enc.EncryptValue([]byte("stale"))
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+
+	content := []byte("LIVE=ENC[" + live + "]  # old: ENC[" + stale + "]\n" +
+		"# ENC[" + stale + "]\n")
+
+	rotated, count, err := RewrapContent(context.Background(), content, oldUnwrapper, oldPriv.Size(), newWrapper)
+	if err != nil {
+		t.Fatalf("RewrapContent: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("rotated %d markers, want 1 (the commented ones must be skipped)", count)
+	}
+	if bytes.Contains(rotated, []byte("ENC["+live+"]")) {
+		t.Errorf("the live marker was not rewrapped")
+	}
+	if n := bytes.Count(rotated, []byte("ENC["+stale+"]")); n != 2 {
+		t.Errorf("commented ciphertexts were sent to the KMS: found %d of 2 unchanged", n)
+	}
+}
+
+func TestExtractEnvRejectsMultiLineValues(t *testing.T) {
+	// A multi-line plaintext is now expressible, and `run` splits on newlines,
+	// so an unguarded value could inject extra variables into the child
+	// environment. Fail loudly instead.
+	pub, priv, _ := crypto.GenerateKeypair()
+	content := []byte("SAFE=ENC[ok]\nEVIL=ENC[first\\nINJECTED=yes]\n")
+	content = bytes.ReplaceAll(content, []byte(`\n`), []byte("\n"))
+
+	encrypted, err := EncryptContent(content, NaclEncryptor{PublicKey: pub})
+	if err != nil {
+		t.Fatalf("EncryptContent: %v", err)
+	}
+
+	env, err := ExtractEnv(context.Background(), encrypted, NaclDecryptor{PrivateKey: priv})
+	if err == nil {
+		t.Fatalf("expected a multi-line value to be rejected; got env %v", env)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("EVIL")) || !bytes.Contains([]byte(err.Error()), []byte("multi-line")) {
+		t.Errorf("error should name the offending key and the reason; got: %v", err)
+	}
+	if env != nil {
+		t.Errorf("no environment should be returned on failure; got %v", env)
+	}
+}
+
+func TestExtractEnvReportsDefects(t *testing.T) {
+	pub, priv, _ := crypto.GenerateKeypair()
+	content := []byte("GOOD=ENC[value]\n")
+	encrypted, err := EncryptContent(content, NaclEncryptor{PublicKey: pub})
+	if err != nil {
+		t.Fatalf("EncryptContent: %v", err)
+	}
+	encrypted = append(encrypted, []byte("BROKEN=ENC[oops\n")...)
+
+	env, defects, err := ExtractEnvWithDefects(context.Background(), encrypted, NaclDecryptor{PrivateKey: priv})
+	if err != nil {
+		t.Fatalf("ExtractEnvWithDefects: %v", err)
+	}
+	if len(defects) != 1 || defects[0].Kind != Unterminated {
+		t.Errorf("defects = %+v, want one Unterminated", defects)
+	}
+	if env["GOOD"] != "value" {
+		t.Errorf("a defect elsewhere must not stop the good values loading; got %v", env)
+	}
+}
+
+func TestEncryptContentReportsMalformedCiphertext(t *testing.T) {
+	pub, _, _ := crypto.GenerateKeypair()
+	content := []byte("A=ENC[v1:truncated\nB=ENC[plain]\n")
+
+	out, defects, err := EncryptContentWithDefects(content, NaclEncryptor{PublicKey: pub})
+	if err != nil {
+		t.Fatalf("EncryptContentWithDefects: %v", err)
+	}
+	if len(defects) != 1 || defects[0].Kind != MalformedCiphertext {
+		t.Fatalf("defects = %+v, want one MalformedCiphertext", defects)
+	}
+	// The healthy marker on the next line is still processed.
+	if !bytes.Contains(out, []byte("B=ENC[v1:")) {
+		t.Errorf("a defect must not stop the rest of the file from encrypting: %s", out)
+	}
+}
+
+func TestDefectsInCommentsAreNotReported(t *testing.T) {
+	pub, _, _ := crypto.GenerateKeypair()
+	content := []byte("# TODO: wrap this in ENC[\nA=ENC[value]\n")
+
+	_, defects, err := EncryptContentWithDefects(content, NaclEncryptor{PublicKey: pub})
+	if err != nil {
+		t.Fatalf("EncryptContentWithDefects: %v", err)
+	}
+	if len(defects) != 0 {
+		t.Errorf("prose in a comment is not a malformed marker; got %+v", defects)
+	}
+}

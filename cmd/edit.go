@@ -35,9 +35,12 @@ var editCmd = &cobra.Command{
 			content = []byte{}
 		}
 
-		decrypted, err := processor.DecryptContent(cmd.Context(), content, dec, true)
+		decrypted, defects, err := processor.DecryptContentWithDefects(cmd.Context(), content, dec, true)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt content: %w", err)
+		}
+		if err := defectError(targetFile, content, defects); err != nil {
+			return err
 		}
 
 		// 3. Create temp file
@@ -74,9 +77,13 @@ var editCmd = &cobra.Command{
 			return fmt.Errorf("failed to read edited content: %w", err)
 		}
 
-		encrypted, err := processor.EncryptContent(editedContent, enc)
+		encrypted, defects, err := processor.EncryptContentWithDefects(editedContent, enc)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt content: %w", err)
+		}
+		// Write path: bail before overwriting the original file.
+		if err := defectError(targetFile, editedContent, defects); err != nil {
+			return err
 		}
 
 		// 6. Write back to original file

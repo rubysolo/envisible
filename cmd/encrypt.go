@@ -31,9 +31,14 @@ var encryptCmd = &cobra.Command{
 			return fmt.Errorf("failed to read file: %w", err)
 		}
 
-		encrypted, err := processor.EncryptContent(content, enc)
+		encrypted, defects, err := processor.EncryptContentWithDefects(content, enc)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt content: %w", err)
+		}
+		// Write path: refuse to produce an artifact whose markers don't parse
+		// the way they look. Nothing is written.
+		if err := defectError(targetFile, content, defects); err != nil {
+			return err
 		}
 
 		if inplace {

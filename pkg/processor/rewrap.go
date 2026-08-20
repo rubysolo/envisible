@@ -1,8 +1,10 @@
 package processor
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 
 	"github.com/rubysolo/envisible/pkg/kms"
@@ -15,28 +17,45 @@ import (
 // to be reconstructed in memory.
 //
 // Markers other than ENC[v2:...] (including ENC[v1:...] and plain ENC[...])
-// pass through unchanged. If any v2 marker fails to unwrap/rewrap, the whole
-// operation returns an error and the caller should not write the result.
+// pass through unchanged, as do markers inside comments — a ciphertext parked
+// in a comment for reference is never sent to the KMS, matching DecryptContent.
+// If any v2 marker fails to unwrap/rewrap, the whole operation returns an error
+// and the caller should not write the result.
 func RewrapContent(ctx context.Context, content []byte, oldUnwrapper kms.Unwrapper, oldWrappedSize int, newWrapper kms.Wrapper) ([]byte, int, error) {
-	var lastErr error
-	rotated := 0
-	result := encRegex.ReplaceAllFunc(content, func(match []byte) []byte {
-		inner := string(match[4 : len(match)-1])
-		newInner, err := rewrapV2Inner(ctx, inner, oldUnwrapper, oldWrappedSize, newWrapper)
-		if err == ErrSkip {
-			return match
+	out, rotated, _, err := RewrapContentWithDefects(ctx, content, oldUnwrapper, oldWrappedSize, newWrapper)
+	return out, rotated, err
+}
+
+// RewrapContentWithDefects is RewrapContent plus the scanner defects found
+// outside comments. Rotation is a read path, so `kms rotate` warns on them and
+// proceeds.
+func RewrapContentWithDefects(ctx context.Context, content []byte, oldUnwrapper kms.Unwrapper, oldWrappedSize int, newWrapper kms.Wrapper) ([]byte, int, []Defect, error) {
+	markers, defects := Scan(content)
+
+	var (
+		out     bytes.Buffer
+		cursor  int
+		rotated int
+	)
+	out.Grow(len(content))
+	for _, m := range markers {
+		if !m.Encrypted {
+			continue
+		}
+		newInner, err := rewrapV2Inner(ctx, m.Raw, oldUnwrapper, oldWrappedSize, newWrapper)
+		if errors.Is(err, ErrSkip) {
+			continue
 		}
 		if err != nil {
-			lastErr = err
-			return match
+			return nil, 0, defects, err
 		}
+		out.Write(content[cursor:m.Start])
+		out.WriteString(wrapMarker(newInner))
+		cursor = m.End
 		rotated++
-		return []byte(fmt.Sprintf("ENC[%s]", newInner))
-	})
-	if lastErr != nil {
-		return nil, 0, lastErr
 	}
-	return result, rotated, nil
+	out.Write(content[cursor:])
+	return out.Bytes(), rotated, defects, nil
 }
 
 // rewrapV2Inner takes the inside of an ENC[...] marker. If it's v2-shaped, it

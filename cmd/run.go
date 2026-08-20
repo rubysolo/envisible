@@ -47,7 +47,8 @@ separator is accepted but not required.`,
 			ui.Info("Loading environment from %s", filePath)
 		}
 
-		extraEnv, err := processor.ExtractEnv(cmd.Context(), content, dec)
+		extraEnv, defects, err := processor.ExtractEnvWithDefects(cmd.Context(), content, dec)
+		warnDefects(filePath, content, defects)
 		if err != nil {
 			return fmt.Errorf("failed to process env file: %w", err)
 		}

@@ -37,7 +37,8 @@ var decryptCmd = &cobra.Command{
 			return err
 		}
 
-		decrypted, err := processor.DecryptContent(cmd.Context(), content, dec, !stripMarkers)
+		decrypted, defects, err := processor.DecryptContentWithDefects(cmd.Context(), content, dec, !stripMarkers)
+		warnDefects(targetFile, content, defects)
 		if err != nil {
 			if textconv {
 				fmt.Fprint(cmd.OutOrStdout(), string(content))

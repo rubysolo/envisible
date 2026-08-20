@@ -19,10 +19,7 @@ import (
 	"github.com/rubysolo/envisible/pkg/kms"
 )
 
-var (
-	encRegex      = regexp.MustCompile(`ENC\[(.*?)\]`)
-	versionPrefix = regexp.MustCompile(`^v\d+:`)
-)
+var versionPrefix = regexp.MustCompile(`^v\d+:`)
 
 // ErrSkip signals that a Decryptor does not handle a particular marker version.
 // Callers (including CompositeDecryptor) treat this as "fall through" rather than failure.
@@ -239,75 +236,42 @@ func (c CompositeDecryptor) DecryptMarker(ctx context.Context, inner string) ([]
 // appearing inside a comment (a '#' at line start or preceded by whitespace, in the
 // YAML/TOML/.env convention) are also left alone so old values kept for reference
 // don't get silently re-encrypted.
+//
+// Malformed marker tokens are reported by EncryptContentWithDefects; this
+// wrapper discards them.
 func EncryptContent(content []byte, enc Encryptor) ([]byte, error) {
-	var lastErr error
-	result := walkOutsideComments(content, func(code []byte) []byte {
-		return encRegex.ReplaceAllFunc(code, func(match []byte) []byte {
-			inner := string(match[4 : len(match)-1])
-			if IsEncryptedInner(inner) {
-				return match
-			}
-			ct, err := enc.EncryptValue([]byte(inner))
-			if err != nil {
-				lastErr = err
-				return match
-			}
-			return []byte("ENC[" + ct + "]")
-		})
-	})
-	return result, lastErr
+	out, _, err := EncryptContentWithDefects(content, enc)
+	return out, err
 }
 
-// walkOutsideComments rewrites only the non-comment portion of each line and
-// leaves comment text byte-for-byte intact. A '#' starts a comment when it
-// sits at the start of a line or after whitespace, AND is not itself inside
-// an ENC[...] marker — so values that legitimately contain '#' or '... # ...'
-// round-trip unmodified.
-func walkOutsideComments(content []byte, process func(code []byte) []byte) []byte {
-	var out bytes.Buffer
+// EncryptContentWithDefects is EncryptContent plus the defects the scanner
+// found outside comments. Write paths (`encrypt`, `edit`) turn a non-empty
+// defect list into a hard error rather than writing a file whose markers do not
+// mean what they look like.
+func EncryptContentWithDefects(content []byte, enc Encryptor) ([]byte, []Defect, error) {
+	markers, defects := Scan(content)
+
+	var (
+		out     bytes.Buffer
+		lastErr error
+		cursor  int
+	)
 	out.Grow(len(content))
-	start := 0
-	for i := 0; i <= len(content); i++ {
-		if i < len(content) && content[i] != '\n' {
+	for _, m := range markers {
+		if m.Encrypted {
 			continue
 		}
-		line := content[start:i]
-		code, comment := splitLineComment(line)
-		out.Write(process(code))
-		out.Write(comment)
-		if i < len(content) {
-			out.WriteByte('\n')
-		}
-		start = i + 1
-	}
-	return out.Bytes()
-}
-
-// splitLineComment returns (code, comment) for a single line (no trailing
-// newline). The split point is the first '#' that begins a comment; if no
-// comment is present, comment is nil.
-func splitLineComment(line []byte) (code, comment []byte) {
-	encRanges := encRegex.FindAllIndex(line, -1)
-	inEnc := func(pos int) bool {
-		for _, r := range encRanges {
-			if pos < r[0] {
-				return false
-			}
-			if pos < r[1] {
-				return true
-			}
-		}
-		return false
-	}
-	for i, b := range line {
-		if b != '#' || inEnc(i) {
+		inner, err := enc.EncryptValue([]byte(m.Value))
+		if err != nil {
+			lastErr = err
 			continue
 		}
-		if i == 0 || line[i-1] == ' ' || line[i-1] == '\t' {
-			return line[:i], line[i:]
-		}
+		out.Write(content[cursor:m.Start])
+		out.WriteString(wrapMarker(inner))
+		cursor = m.End
 	}
-	return line, nil
+	out.Write(content[cursor:])
+	return out.Bytes(), defects, lastErr
 }
 
 // DecryptContent scans for ENC[vN:...] markers and rewrites each using dec.
@@ -316,33 +280,87 @@ func splitLineComment(line []byte) (code, comment []byte) {
 // untouched, which lets mixed v1/v2 files round-trip safely. Markers inside comments
 // are also skipped — mirroring EncryptContent — so a ciphertext kept in a comment for
 // reference is never sent to the KMS and never leaked back into the comment text.
+//
+// With keepMarkers, the plaintext is re-escaped on the way out, so an `edit`
+// round-trip is lossless for values containing '[', ']' or '\\'.
 func DecryptContent(ctx context.Context, content []byte, dec Decryptor, keepMarkers bool) ([]byte, error) {
-	var lastErr error
-	result := walkOutsideComments(content, func(code []byte) []byte {
-		return encRegex.ReplaceAllFunc(code, func(match []byte) []byte {
-			inner := string(match[4 : len(match)-1])
-			pt, err := dec.DecryptMarker(ctx, inner)
-			if errors.Is(err, ErrSkip) {
-				return match
-			}
-			if err != nil {
-				lastErr = err
-				return match
-			}
-			if keepMarkers {
-				return []byte(fmt.Sprintf("ENC[%s]", string(pt)))
-			}
-			return pt
-		})
-	})
-	return result, lastErr
+	out, _, err := DecryptContentWithDefects(ctx, content, dec, keepMarkers)
+	return out, err
+}
+
+// DecryptContentWithDefects is DecryptContent plus the defects the scanner
+// found outside comments. Read paths (`decrypt`, `run`) warn on them and carry
+// on: a stray ENC[ in a config file must not take down a deploy.
+func DecryptContentWithDefects(ctx context.Context, content []byte, dec Decryptor, keepMarkers bool) ([]byte, []Defect, error) {
+	render := func(_ Marker, plaintext []byte) (string, error) {
+		if keepMarkers {
+			return wrapMarker(escapeMarkerValue(string(plaintext))), nil
+		}
+		return string(plaintext), nil
+	}
+	return decryptContent(ctx, content, dec, render)
+}
+
+// decryptContent is the shared splice loop behind DecryptContent and
+// ExtractEnv. render turns a decrypted marker into its replacement text; an
+// error from render aborts immediately (that is how ExtractEnv refuses
+// multi-line values).
+func decryptContent(ctx context.Context, content []byte, dec Decryptor, render func(Marker, []byte) (string, error)) ([]byte, []Defect, error) {
+	markers, defects := Scan(content)
+
+	var (
+		out     bytes.Buffer
+		lastErr error
+		cursor  int
+	)
+	out.Grow(len(content))
+	for _, m := range markers {
+		if !m.Encrypted {
+			continue
+		}
+		plaintext, err := dec.DecryptMarker(ctx, m.Raw)
+		if errors.Is(err, ErrSkip) {
+			continue
+		}
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		replacement, err := render(m, plaintext)
+		if err != nil {
+			return nil, defects, err
+		}
+		out.Write(content[cursor:m.Start])
+		out.WriteString(replacement)
+		cursor = m.End
+	}
+	out.Write(content[cursor:])
+	return out.Bytes(), defects, lastErr
 }
 
 // ExtractEnv decrypts content and parses it as a .env-style key=value mapping.
 func ExtractEnv(ctx context.Context, content []byte, dec Decryptor) (map[string]string, error) {
-	decrypted, err := DecryptContent(ctx, content, dec, false)
+	env, _, err := ExtractEnvWithDefects(ctx, content, dec)
+	return env, err
+}
+
+// ExtractEnvWithDefects is ExtractEnv plus the scanner defects, so `run` can
+// warn about them.
+//
+// Multi-line plaintexts are rejected outright. The .env grammar here is
+// line-oriented, so a decrypted value containing a newline would let secret
+// content inject additional variables into the child environment. Failing loudly
+// is the interim guard until `run` learns a real .env parser.
+func ExtractEnvWithDefects(ctx context.Context, content []byte, dec Decryptor) (map[string]string, []Defect, error) {
+	guard := func(m Marker, plaintext []byte) (string, error) {
+		if bytes.ContainsRune(plaintext, '\n') {
+			return "", fmt.Errorf("%s: multi-line values are not supported by `run` yet", envKeyAt(content, m.Start))
+		}
+		return string(plaintext), nil
+	}
+	decrypted, defects, err := decryptContent(ctx, content, dec, guard)
 	if err != nil {
-		return nil, err
+		return nil, defects, err
 	}
 
 	env := make(map[string]string)
@@ -359,5 +377,22 @@ func ExtractEnv(ctx context.Context, content []byte, dec Decryptor) (map[string]
 			env[key] = val
 		}
 	}
-	return env, nil
+	return env, defects, nil
+}
+
+// envKeyAt names the variable a marker belongs to, for error messages: the text
+// before the first '=' on the marker's line. Falls back to the whole line
+// prefix when there is no '='.
+func envKeyAt(content []byte, offset int) string {
+	lineStart := bytes.LastIndexByte(content[:offset], '\n') + 1
+	segment := content[lineStart:offset]
+	if i := bytes.IndexByte(segment, '='); i >= 0 {
+		segment = segment[:i]
+	}
+	key := strings.TrimSpace(string(segment))
+	if key == "" {
+		line, _ := LineCol(content, offset)
+		return fmt.Sprintf("line %d", line)
+	}
+	return key
 }

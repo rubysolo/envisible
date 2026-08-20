@@ -912,3 +912,291 @@ func TestAllCommandsUseGlobalFilePath(t *testing.T) {
 		t.Errorf("run with -f didn't load env vars: %s", b.String())
 	}
 }
+
+// setupKeyedTempDir chdirs into a fresh temp dir with an envisible keypair.
+func setupKeyedTempDir(t *testing.T) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	t.Cleanup(func() { os.Chdir(oldWd) })
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"keygen"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+}
+
+// TestCheckFailsOnEvidenceTableRows walks the four inputs from
+// docs/plans/01-marker-scanner.md that `check` used to report as clean.
+func TestCheckFailsOnEvidenceTableRows(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	rows := map[string]string{
+		"truncated_by_trailing_bracket": "password: ENC[ab]cd]\n",
+		"bracketed_structure":           `sa: ENC[{"scopes":["a","b"]}]` + "\n",
+		"multi_line_value":              "key: ENC[-----BEGIN KEY-----\nMIIEv\n-----END KEY-----]\n",
+		"unterminated_marker":           "key: ENC[oops-no-close\n",
+	}
+
+	for name, content := range rows {
+		t.Run(name, func(t *testing.T) {
+			confFile := name + ".yaml"
+			if err := os.WriteFile(confFile, []byte(content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			resetRoot(nil)
+			rootCmd.SetArgs([]string{"check", confFile})
+			if err := rootCmd.Execute(); err == nil {
+				t.Errorf("check passed on %q — it must not", content)
+			}
+		})
+	}
+}
+
+// The row-5 control: a file that was always handled correctly must still pass.
+func TestCheckStillPassesOnTwoMarkersPerLine(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	confFile := "two.yaml"
+	if err := os.WriteFile(confFile, []byte("a: ENC[one] b: ENC[two]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	encrypted, _ := os.ReadFile(confFile)
+	if n := bytes.Count(encrypted, []byte("ENC[v1:")); n != 2 {
+		t.Fatalf("expected 2 encrypted markers, got %d: %s", n, encrypted)
+	}
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"check", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Errorf("check should pass for two real ciphertexts on one line: %v", err)
+	}
+}
+
+func TestEncryptErrorsOnUnterminatedMarkerInCode(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	confFile := "broken.yaml"
+	content := []byte("key: ENC[oops-no-close\n")
+	if err := os.WriteFile(confFile, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("encrypt should refuse to write a file with an unterminated marker")
+	}
+	if !contains(err.Error(), "broken.yaml:1:6") {
+		t.Errorf("error should point at file:line:col; got %v", err)
+	}
+
+	after, _ := os.ReadFile(confFile)
+	if !bytes.Equal(after, content) {
+		t.Errorf("nothing should have been written; file is now %q", after)
+	}
+}
+
+func TestEncryptSucceedsWithUnterminatedMarkerInComment(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	confFile := "prose.yaml"
+	content := []byte("# TODO: wrap this in ENC[\npassword: ENC[real]\n")
+	if err := os.WriteFile(confFile, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("an unterminated ENC[ inside a comment is prose, not a defect: %v", err)
+	}
+
+	after, _ := os.ReadFile(confFile)
+	if !bytes.Contains(after, []byte("# TODO: wrap this in ENC[")) {
+		t.Errorf("comment was rewritten: %s", after)
+	}
+	if !bytes.Contains(after, []byte("password: ENC[v1:")) {
+		t.Errorf("real value was not encrypted: %s", after)
+	}
+}
+
+// Read paths warn and carry on: a stray ENC[ in a config file must not take
+// down a deploy.
+func TestDecryptWarnsButSucceedsOnUnterminatedMarker(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	confFile := "mixed.yaml"
+	if err := os.WriteFile(confFile, []byte("password: ENC[real]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	encrypted, _ := os.ReadFile(confFile)
+	if err := os.WriteFile(confFile, append(encrypted, []byte("note: ENC[oops\n")...), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	b := bytes.NewBufferString("")
+	var stderr string
+	_, stderr = captureStdStreams(t, func() {
+		resetRoot(b)
+		rootCmd.SetArgs([]string{"decrypt", confFile})
+		if err := rootCmd.Execute(); err != nil {
+			t.Errorf("decrypt should warn, not fail: %v", err)
+		}
+	})
+
+	if !contains(b.String(), "password: ENC[real]") {
+		t.Errorf("healthy marker was not decrypted: %q", b.String())
+	}
+	if !contains(stderr, "unterminated") {
+		t.Errorf("expected a warning on stderr, got %q", stderr)
+	}
+}
+
+func TestRunWarnsButSucceedsOnUnterminatedMarker(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	if err := os.WriteFile(".env", []byte("MY_VAR=ENC[secret-value]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", ".env"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	encrypted, _ := os.ReadFile(".env")
+	if err := os.WriteFile(".env", append(encrypted, []byte("NOTE=ENC[oops\n")...), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	b := bytes.NewBufferString("")
+	_, stderr := captureStdStreams(t, func() {
+		resetRoot(b)
+		rootCmd.SetArgs([]string{"run", "--", "env"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Errorf("run should warn, not fail: %v", err)
+		}
+	})
+
+	if !contains(b.String(), "MY_VAR=secret-value") {
+		t.Errorf("healthy value did not reach the child env: %s", b.String())
+	}
+	if !contains(stderr, "unterminated") {
+		t.Errorf("expected a warning on stderr, got %q", stderr)
+	}
+}
+
+// A multi-line secret must not be able to inject extra variables into the
+// child environment via `run`'s line-oriented .env parsing.
+func TestRunRejectsMultiLineValue(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	if err := os.WriteFile(".env", []byte("EVIL=ENC[first\nINJECTED=yes]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", ".env"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"run", "--", "env"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatalf("run must refuse a multi-line value; output was %q", b.String())
+	}
+	if !contains(err.Error(), "multi-line") {
+		t.Errorf("error should explain the refusal; got %v", err)
+	}
+	if contains(b.String(), "INJECTED=yes") {
+		t.Errorf("secret content leaked into the child environment: %s", b.String())
+	}
+}
+
+// End-to-end for the file shapes that used to be silently mangled.
+func TestEncryptDecryptRoundTripsBracketsAndMultiLineValues(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	confFile := "config.yaml"
+	original := "sa: ENC[{\"scopes\":[\"a\",\"b\"]}]\n" +
+		"key: ENC[-----BEGIN KEY-----\nMIIEv\n-----END KEY-----]\n" +
+		"pw: ENC[ab\\]cd]\n"
+	if err := os.WriteFile(confFile, []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	encrypted, _ := os.ReadFile(confFile)
+	for _, leak := range []string{"scopes", "MIIEv", "abcd", "ab]cd"} {
+		if bytes.Contains(encrypted, []byte(leak)) {
+			t.Errorf("plaintext %q survived encryption: %s", leak, encrypted)
+		}
+	}
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"check", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Errorf("check should pass after a clean encrypt: %v", err)
+	}
+
+	// --strip recovers the exact plaintexts, brackets and newlines intact.
+	b := bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"decrypt", "--strip", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("decrypt --strip: %v", err)
+	}
+	wantPlain := "sa: {\"scopes\":[\"a\",\"b\"]}\n" +
+		"key: -----BEGIN KEY-----\nMIIEv\n-----END KEY-----\n" +
+		"pw: ab]cd\n"
+	if b.String() != wantPlain {
+		t.Errorf("stripped round trip mismatch.\ngot:\n%q\nwant:\n%q", b.String(), wantPlain)
+	}
+
+	// Keeping the markers re-emits values in the canonical escaped form, which
+	// must re-encrypt to the same secrets (the `edit` round trip).
+	b = bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"decrypt", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("decrypt: %v", err)
+	}
+	editable := b.String()
+	if err := os.WriteFile(confFile, []byte(editable), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("re-encrypt: %v", err)
+	}
+	b = bytes.NewBufferString("")
+	resetRoot(b)
+	rootCmd.SetArgs([]string{"decrypt", "--strip", confFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("decrypt --strip after edit: %v", err)
+	}
+	if b.String() != wantPlain {
+		t.Errorf("edit round trip lost data.\ngot:\n%q\nwant:\n%q", b.String(), wantPlain)
+	}
+}

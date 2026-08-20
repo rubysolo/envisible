@@ -82,7 +82,8 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("read %s: %w", f, err)
 			}
-			newContent, n, err := processor.RewrapContent(cmd.Context(), content, oldUnwrapper, oldInfo.PubKey.Size(), newWrapper)
+			newContent, n, defects, err := processor.RewrapContentWithDefects(cmd.Context(), content, oldUnwrapper, oldInfo.PubKey.Size(), newWrapper)
+			warnDefects(f, content, defects)
 			if err != nil {
 				return fmt.Errorf("rewrap %s: %w", f, err)
 			}
