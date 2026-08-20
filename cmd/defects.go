@@ -8,8 +8,32 @@ import (
 	"github.com/rubysolo/envisible/pkg/ui"
 )
 
-// describeDefect renders one scanner defect as "file:line:col: message".
-func describeDefect(file string, content []byte, d processor.Defect) string {
+// defectContext is the per-command phrasing for defects whose meaning depends
+// on what the user was doing. Marker defects read the same everywhere; a line
+// that is not NAME=value does not — under `run` it was skipped, under
+// `set --from-env` it is the caller's own payload and nothing is skipped. A
+// message must never describe a command the user did not run.
+type defectContext struct {
+	// malformedEnvLine is the text after "file:line:col: " for a
+	// MalformedEnvLine defect.
+	malformedEnvLine string
+}
+
+var (
+	// runContext is the default: the file was being read to populate an
+	// environment, and the bad line was left out of it.
+	runContext = defectContext{
+		malformedEnvLine: "skipped: not a NAME=value assignment, so `run` cannot turn it into an environment variable",
+	}
+	// payloadContext is for `set --from-env`, where the input is the caller's
+	// stdin and a bad line means the payload is wrong, not the file.
+	payloadContext = defectContext{
+		malformedEnvLine: "not a NAME=value assignment; every non-blank, non-comment line of a --from-env payload must be one",
+	}
+)
+
+// describe renders one scanner defect as "file:line:col: message".
+func (c defectContext) describe(file string, content []byte, d processor.Defect) string {
 	line, col := processor.LineCol(content, d.Offset)
 	switch d.Kind {
 	case processor.Unterminated:
@@ -17,10 +41,15 @@ func describeDefect(file string, content []byte, d processor.Defect) string {
 	case processor.MalformedCiphertext:
 		return fmt.Sprintf("%s:%d:%d: malformed ENC[vN:...] marker — no closing ']' before end of line (ciphertext is base64 and never spans lines)", file, line, col)
 	case processor.MalformedEnvLine:
-		return fmt.Sprintf("%s:%d:%d: skipped: not a NAME=value assignment, so `run` cannot turn it into an environment variable", file, line, col)
+		return fmt.Sprintf("%s:%d:%d: %s", file, line, col, c.malformedEnvLine)
 	default:
 		return fmt.Sprintf("%s:%d:%d: %s", file, line, col, d.Kind)
 	}
+}
+
+// describeDefect renders one scanner defect with the default (`run`) phrasing.
+func describeDefect(file string, content []byte, d processor.Defect) string {
+	return runContext.describe(file, content, d)
 }
 
 // defectError turns scanner defects into a hard failure. Used by the write and

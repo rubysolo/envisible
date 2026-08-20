@@ -59,13 +59,6 @@ KMS-backed markers this hits the cloud KMS — once per unique wrapped data key
 			}
 		}
 
-		// Tokens the scanner could not parse at all: an ENC[ that never closes,
-		// or a ciphertext marker truncated at a newline. Both used to be
-		// invisible — the old regex simply didn't match, so `check` passed.
-		for _, d := range defects {
-			ui.Error("%s", describeDefect(name, content, d))
-		}
-
 		for _, m := range markers {
 			fullMatch := string(content[m.Start:m.End])
 
@@ -93,6 +86,10 @@ KMS-backed markers this hits the cloud KMS — once per unique wrapped data key
 			}
 		}
 
+		// Tokens the scanner could not parse at all: an ENC[ that never closes,
+		// or a ciphertext marker truncated at a newline. Both used to be
+		// invisible — the old regex simply didn't match, so `check` passed.
+		// Rendered once, here, by the error main prints.
 		if err := defectError(name, content, defects); err != nil {
 			return err
 		}

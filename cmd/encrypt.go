@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/rubysolo/envisible/pkg/processor"
 	"github.com/rubysolo/envisible/pkg/ui"
@@ -47,9 +46,8 @@ var encryptCmd = &cobra.Command{
 		warnAmbiguousMarkers(name, content)
 
 		if inplace && !isStdin {
-			err = os.WriteFile(targetFile, encrypted, 0644)
-			if err != nil {
-				return fmt.Errorf("failed to write file: %w", err)
+			if err := writeFileAtomic(targetFile, encrypted, newFileMode); err != nil {
+				return err
 			}
 			ui.Success("File %s encrypted in-place.", targetFile)
 		} else {

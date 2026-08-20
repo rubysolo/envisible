@@ -96,7 +96,7 @@ Examples:
 		// the reverse (new pubkey, old wrapped DKs in files).
 		total := 0
 		for _, r := range results {
-			if err := os.WriteFile(r.path, r.content, 0644); err != nil {
+			if err := writeFileAtomic(r.path, r.content, newFileMode); err != nil {
 				return fmt.Errorf("write %s: %w", r.path, err)
 			}
 			total += r.rotated

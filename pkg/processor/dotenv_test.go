@@ -282,3 +282,30 @@ func TestActionString(t *testing.T) {
 		}
 	}
 }
+
+// The write paths must learn about a damaged file from the same call that
+// locates their line, so the defects are returned rather than dropped.
+func TestDotenvEntryPointsReturnScannerDefects(t *testing.T) {
+	damaged := []byte("A=ENC[oops\nB=1\n")
+
+	if _, defects := LooksLikeDotenvWithDefects(damaged); len(defects) != 1 || defects[0].Kind != Unterminated {
+		t.Errorf("LooksLikeDotenvWithDefects: defects = %+v, want one Unterminated", defects)
+	}
+	if _, _, defects := UpsertWithDefects(damaged, "B", "ENC[v1:x]"); len(defects) != 1 || defects[0].Kind != Unterminated {
+		t.Errorf("UpsertWithDefects: defects = %+v, want one Unterminated", defects)
+	}
+	// Reported even when the key is absent: the caller is deciding what to do
+	// with the file, not just the key.
+	_, found, defects, err := LookupValueWithDefects(context.Background(), damaged, "NOPE", nil)
+	if err != nil || found {
+		t.Fatalf("LookupValueWithDefects: found=%v err=%v", found, err)
+	}
+	if len(defects) != 1 || defects[0].Kind != Unterminated {
+		t.Errorf("LookupValueWithDefects: defects = %+v, want one Unterminated", defects)
+	}
+
+	clean := []byte("A=1\n")
+	if _, defects := LooksLikeDotenvWithDefects(clean); len(defects) != 0 {
+		t.Errorf("clean content reported defects: %+v", defects)
+	}
+}

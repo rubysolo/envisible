@@ -254,7 +254,8 @@ Flags: `--from-json` (a JSON object of `KEY` → string) and `--from-env` (doten
 What it guarantees:
 
 - **Layout is preserved.** An existing key keeps its `export ` prefix, indentation, spacing and trailing `# comment`; only the value span is rewritten. A new key is appended with exactly one trailing newline. Everything else — comments, ordering, unrelated lines — is copied byte for byte. If a key is assigned more than once, the last assignment is the one rewritten, because that is the one `run` would use.
-- **Writes are atomic**: a temp file in the same directory, `fsync`, `rename`, with the file's existing mode preserved (0644 for a new file).
+- **Writes are atomic**: a temp file in the same directory, `fsync`, `rename`, with the file's existing mode preserved (0644 for a new file). A symlinked target stays a symlink and its target is what changes; a dangling symlink is an error rather than a new file where the link used to point. The same writer backs `encrypt -i`, `decrypt -i`, `edit` and `kms rotate`.
+- **A damaged target is refused.** `set` is a write path and follows the write path's defect contract (see [Marker grammar](#marker-grammar)): a file that already holds an unterminated `ENC[` fails with `file:line:col` and is left byte-identical, rather than producing a file the pre-commit hook then rejects — which matters most for the developer with only `envisible.pub`, who cannot check their own work.
 - **Exactly one trailing newline is trimmed** from stdin, since editors, heredocs and `echo` all add one and a credential with a stray `\n` fails far from the command that broke it. Trimming exactly one means a multi-line secret keeps its shape; `--raw` keeps the bytes verbatim.
 - **Empty stdin is an error and nothing is written.** A process that dies upstream in a pipe closes it with no bytes, which at this end is indistinguishable from success — without the guard, a live credential would be replaced with an empty one and reported as done. Pass `--allow-empty` when you mean it.
 - A terminal on stdin is refused, an invalid key name is rejected before the file is touched, and a target that is not dotenv-shaped (a JSON document, a YAML `---`, a file of `key: value` lines) is rejected with a pointer at `envisible edit`.
@@ -271,7 +272,7 @@ That matters more than it sounds. A noisy diff is a security regression in a too
 - `set` writes **only the keys it was given**. There is no "sync the whole file" mode.
 - `--from-json` writes — and therefore churns — every key in the payload.
 - `--if-changed` decrypts the current value and skips keys that already match. It needs decrypt capability, so it is opt-in; without one it fails loudly rather than quietly rewriting everything.
-- `--dry-run` reports per key (`added` / `updated` / `unchanged`) and writes nothing.
+- `--dry-run` writes nothing and is a gate: it prints one `action<TAB>KEY<TAB>file` line per key (`added` / `updated` / `unchanged`) on **stdout** — so `-q` cannot silence it — and exits non-zero if anything would change, the same shape as `check`. `envisible -q set --dry-run --if-changed .env KEY -` is therefore a usable CI drift check.
 
 Use `set` to **add** a key and to **rotate** a key. A periodic "push everything" loop built on top of it will produce diffs nobody reads.
 
@@ -472,7 +473,7 @@ An `ENC[` that never closes is a **defect**, not an invisible no-op, and so is a
 
 | Command | On a defect |
 | --- | --- |
-| `encrypt`, `edit`, `check` | **error** with `file:line:col`, nothing written |
+| `encrypt`, `edit`, `set`, `check` | **error** with `file:line:col`, nothing written |
 | `decrypt`, `run`, `kms rotate` | **warn** on stderr and continue — a stray `ENC[` must not take down a deploy |
 
 ```

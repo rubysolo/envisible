@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/rubysolo/envisible/pkg/processor"
 	"github.com/spf13/cobra"
@@ -49,9 +48,8 @@ var decryptCmd = &cobra.Command{
 		}
 
 		if inplace && !isStdin {
-			err = os.WriteFile(targetFile, decrypted, 0644)
-			if err != nil {
-				return fmt.Errorf("failed to write file: %w", err)
+			if err := writeFileAtomic(targetFile, decrypted, newFileMode); err != nil {
+				return err
 			}
 		} else {
 			fmt.Fprint(cmd.OutOrStdout(), string(decrypted))

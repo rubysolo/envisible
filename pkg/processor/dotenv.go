@@ -146,7 +146,16 @@ func (p *envParser) walk(visit func(dotenvLine) bool) {
 // child process. Rewriting any other occurrence would leave the file looking
 // updated while the effective value stayed stale.
 func Upsert(content []byte, key, rawValue string) ([]byte, Action) {
-	p, _ := newEnvParser(content, nil)
+	out, action, _ := UpsertWithDefects(content, key, rawValue)
+	return out, action
+}
+
+// UpsertWithDefects is Upsert, also returning the scanner defects found in
+// content. A write path must consult them: a file with an unterminated marker
+// is pre-existing damage, and splicing a new value into it produces an artifact
+// the pre-commit hook will reject — with no signal at the point of the write.
+func UpsertWithDefects(content []byte, key, rawValue string) ([]byte, Action, []Defect) {
+	p, defects := newEnvParser(content, nil)
 
 	found := false
 	var vs, ve int
@@ -161,7 +170,7 @@ func Upsert(content []byte, key, rawValue string) ([]byte, Action) {
 	})
 
 	if !found {
-		return appendAssignment(content, key, rawValue), Added
+		return appendAssignment(content, key, rawValue), Added, defects
 	}
 
 	var out bytes.Buffer
@@ -169,7 +178,7 @@ func Upsert(content []byte, key, rawValue string) ([]byte, Action) {
 	out.Write(content[:vs])
 	out.WriteString(rawValue)
 	out.Write(content[ve:])
-	return out.Bytes(), Updated
+	return out.Bytes(), Updated, defects
 }
 
 // appendAssignment adds `key=rawValue` at the end of content, leaving it with
@@ -198,7 +207,16 @@ func appendAssignment(content []byte, key, rawValue string) []byte {
 // not require decrypt permission for, or even the ability to parse, every other
 // marker in the file.
 func LookupValue(ctx context.Context, content []byte, key string, dec Decryptor) (string, bool, error) {
-	p, _ := newEnvParser(content, dec)
+	value, found, _, err := LookupValueWithDefects(ctx, content, key, dec)
+	return value, found, err
+}
+
+// LookupValueWithDefects is LookupValue, also returning the scanner defects
+// found in content. Defects are reported even when the key is absent: the
+// caller is about to decide what to do with the file, and a defect elsewhere in
+// it is part of that decision.
+func LookupValueWithDefects(ctx context.Context, content []byte, key string, dec Decryptor) (string, bool, []Defect, error) {
+	p, defects := newEnvParser(content, dec)
 
 	var (
 		line  dotenvLine
@@ -211,14 +229,14 @@ func LookupValue(ctx context.Context, content []byte, key string, dec Decryptor)
 		return true
 	})
 	if !found {
-		return "", false, nil
+		return "", false, defects, nil
 	}
 
 	value, err := p.value(ctx, line.valueStart, line.valueEnd)
 	if err != nil {
-		return "", true, err
+		return "", true, defects, err
 	}
-	return value, true, nil
+	return value, true, defects, nil
 }
 
 // yamlDocumentStart is the one non-dotenv shape common enough, and destructive
@@ -234,15 +252,23 @@ const yamlDocumentStart = "---"
 // complain about and no human will notice. Empty content passes: a file that
 // does not exist yet is about to be a .env file.
 func LooksLikeDotenv(content []byte) bool {
+	ok, _ := LooksLikeDotenvWithDefects(content)
+	return ok
+}
+
+// LooksLikeDotenvWithDefects is LooksLikeDotenv, also returning the scanner
+// defects found in content. It is the natural first call a dotenv write path
+// makes, so it is the natural place to learn the file is already damaged.
+func LooksLikeDotenvWithDefects(content []byte) (bool, []Defect) {
 	trimmed := bytes.TrimSpace(content)
 	if len(trimmed) == 0 {
-		return true
+		return true, nil
 	}
 	if (trimmed[0] == '{' || trimmed[0] == '[') && json.Valid(trimmed) {
-		return false
+		return false, nil
 	}
 
-	p, _ := newEnvParser(content, nil)
+	p, defects := newEnvParser(content, nil)
 	lines, assignments, first := 0, 0, ""
 	p.walk(func(l dotenvLine) bool {
 		if lines == 0 {
@@ -256,10 +282,10 @@ func LooksLikeDotenv(content []byte) bool {
 	})
 
 	if strings.TrimSpace(first) == yamlDocumentStart {
-		return false
+		return false, defects
 	}
 	// Nothing but blank lines and comments is still a .env file. Otherwise at
 	// least one line has to actually be an assignment; a file of `key: value`
 	// pairs produces none.
-	return lines == 0 || assignments > 0
+	return lines == 0 || assignments > 0, defects
 }

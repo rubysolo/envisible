@@ -54,6 +54,14 @@ func targetName(target string) string {
 // Empty stdin is *not* an error: an empty file is a legitimate thing to
 // encrypt, decrypt or check.
 func readTarget(cmd *cobra.Command, target string) (content []byte, isStdin bool, err error) {
+	return readTargetWithRemedy(cmd, target, "pipe input or pass a file path")
+}
+
+// readTargetWithRemedy is readTarget with the caller choosing what to tell a
+// user whose stdin is a terminal. "Pass a file path" is right for encrypt,
+// decrypt and check, and impossible for set, whose value can only ever come
+// from stdin.
+func readTargetWithRemedy(cmd *cobra.Command, target, ttyRemedy string) (content []byte, isStdin bool, err error) {
 	if target != stdinTarget {
 		content, err = os.ReadFile(target)
 		if err != nil {
@@ -68,7 +76,7 @@ func readTarget(cmd *cobra.Command, target string) (content []byte, isStdin bool
 
 	in := cmd.InOrStdin()
 	if f, ok := in.(*os.File); ok && isTerminal(f) {
-		return nil, true, errors.New("refusing to read from a terminal; pipe input or pass a file path")
+		return nil, true, fmt.Errorf("refusing to read from a terminal; %s", ttyRemedy)
 	}
 
 	content, err = io.ReadAll(in)

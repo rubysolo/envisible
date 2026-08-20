@@ -1643,3 +1643,102 @@ func TestRunSecretCannotInjectAnEnvVar(t *testing.T) {
 		t.Errorf("secret content took over PATH: %q", got)
 	}
 }
+
+// --- plan 06 ------------------------------------------------------------------
+
+// `check` used to render each defect via ui.Error and then again through the
+// returned error main prints. Once is enough.
+func TestCheckReportsEachDefectExactlyOnce(t *testing.T) {
+	setupKeyedTempDir(t)
+	if err := os.WriteFile("e.env", []byte("A=ENC[oops\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resetRoot(nil)
+	rootCmd.SetArgs([]string{"check", "e.env"})
+	var err error
+	_, stderr := captureStdStreams(t, func() { err = rootCmd.Execute() })
+	if err == nil {
+		t.Fatal("check must fail on an unterminated marker")
+	}
+	if n := strings.Count(stderr, "unterminated"); n != 0 {
+		t.Errorf("check printed the defect %d time(s) itself; it belongs to the returned error only: %q", n, stderr)
+	}
+	if n := strings.Count(err.Error(), "unterminated"); n != 1 {
+		t.Errorf("the error renders the defect %d time(s), want 1: %v", n, err)
+	}
+}
+
+// Every in-place writer follows a symlink: the link stays a link and its target
+// gets the new content. encrypt/decrypt/edit already did this via os.WriteFile;
+// moving them onto the atomic writer must not regress it.
+func TestInPlaceWritersFollowSymlinks(t *testing.T) {
+	mockEditorScript := "#!/bin/sh\nsed -i '' 's/old/new/g' \"$1\" 2>/dev/null || sed -i 's/old/new/g' \"$1\""
+
+	cases := []struct {
+		name    string
+		initial string
+		args    []string
+		want    string // substring expected in the resolved target afterwards
+	}{
+		{"encrypt -i", "password: ENC[old]\n", []string{"encrypt", "-i", "link.yaml"}, "password: ENC[v1:"},
+		{"decrypt -i", "", []string{"decrypt", "-i", "link.yaml"}, "password: ENC[old]"},
+		{"edit", "", []string{"edit", "link.yaml"}, "password: ENC[v1:"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupKeyedTempDir(t)
+			initial := tc.initial
+			if initial == "" {
+				// decrypt and edit need ciphertext to start from.
+				if err := os.WriteFile("real.yaml", []byte("password: ENC[old]\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				resetRoot(nil)
+				rootCmd.SetArgs([]string{"encrypt", "-i", "real.yaml"})
+				if err := rootCmd.Execute(); err != nil {
+					t.Fatalf("seed encrypt: %v", err)
+				}
+			} else if err := os.WriteFile("real.yaml", []byte(initial), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod("real.yaml", 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("real.yaml", "link.yaml"); err != nil {
+				t.Fatalf("symlink: %v", err)
+			}
+			if tc.name == "edit" {
+				mock := filepath.Join(t.TempDir(), "mock-editor.sh")
+				if err := os.WriteFile(mock, []byte(mockEditorScript), 0755); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("EDITOR", mock)
+			}
+
+			resetRoot(nil)
+			rootCmd.SetArgs(tc.args)
+			if err := rootCmd.Execute(); err != nil {
+				t.Fatalf("%v: %v", tc.args, err)
+			}
+
+			if info, err := os.Lstat("link.yaml"); err != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("link.yaml is no longer a symlink: the link was replaced instead of followed")
+			}
+			got, err := os.ReadFile("real.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !contains(string(got), tc.want) {
+				t.Errorf("target not updated through the link: %q (want substring %q)", got, tc.want)
+			}
+			info, err := os.Stat("real.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode := info.Mode().Perm(); mode != 0600 {
+				t.Errorf("mode = %#o, want 0600 preserved", mode)
+			}
+		})
+	}
+}

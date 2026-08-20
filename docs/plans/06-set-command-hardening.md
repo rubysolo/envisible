@@ -1,7 +1,7 @@
 # Plan 06 — Bring `envisible set` in line with the rest of the CLI
 
 **Kind:** correctness + consistency follow-up
-**Status:** proposed
+**Status:** implemented
 **Depends on:** plans 01–05 (all landed on `feat/implement-plans`)
 
 ---
@@ -277,10 +277,10 @@ reads.
 
 ## Done when
 
-- [ ] `set` errors and writes nothing on a defective target, with `file:line:col`
-- [ ] No message mentions a command the user did not run
-- [ ] A symlinked target keeps its link and updates its target, in `set` and everywhere else
-- [ ] `check` prints each defect once
-- [ ] `--dry-run` is a usable CI gate under `-q`
-- [ ] `set --from-json MYKEY -` creates nothing
-- [ ] Full suite green; compatibility gate intact
+- [x] `set` errors and writes nothing on a defective target, with `file:line:col`
+- [x] No message mentions a command the user did not run
+- [x] A symlinked target keeps its link and updates its target, in `set` and everywhere else
+- [x] `check` prints each defect once
+- [x] `--dry-run` is a usable CI gate under `-q`
+- [x] `set --from-json MYKEY -` creates nothing
+- [x] Full suite green; compatibility gate intact

@@ -548,26 +548,54 @@ func TestSetRequiresTheStdinMarker(t *testing.T) {
 
 // --- behavioral --------------------------------------------------------------
 
+// --dry-run is a gate, shaped like `check`: the report goes to stdout where -q
+// cannot silence it, and the exit code says whether anything would change.
 func TestSetDryRunWritesNothingAndReportsTheActions(t *testing.T) {
 	setupKeyedTempDir(t)
 	writeFile(t, ".env", "EXISTING=ENC[v1:abc]\n", 0644)
 	before := readFile(t, ".env")
 
-	err, _, stderr := runSet(t, `{"EXISTING":"a","BRAND_NEW":"b"}`, ".env", "--dry-run", "--from-json", "-")
-	if err != nil {
-		t.Fatalf("set --dry-run: %v", err)
+	out := &bytes.Buffer{}
+	resetSet(t, out, `{"EXISTING":"a","BRAND_NEW":"b"}`)
+	rootCmd.SetArgs([]string{"-q", "set", ".env", "--dry-run", "--from-json", "-"})
+	var err error
+	_, stderr := captureStdStreams(t, func() { err = rootCmd.Execute() })
+
+	if err == nil {
+		t.Fatal("--dry-run with a change must exit non-zero, like `check`")
+	}
+	if !contains(err.Error(), "dry run") {
+		t.Errorf("the error should say it was a dry run: %v", err)
 	}
 	if after := readFile(t, ".env"); !bytes.Equal(before, after) {
 		t.Errorf("--dry-run wrote to the file:\nbefore %q\n after %q", before, after)
 	}
-	if !contains(stderr, "dry run") {
-		t.Errorf("the report should say it is a dry run: %q", stderr)
+	want := "added\tBRAND_NEW\t.env\nupdated\tEXISTING\t.env\n"
+	if out.String() != want {
+		t.Errorf("stdout report under -q:\n got %q\nwant %q", out.String(), want)
 	}
-	if !contains(stderr, "EXISTING (updated)") || !contains(stderr, "BRAND_NEW (added)") {
-		t.Errorf("the report should name added vs updated per key: %q", stderr)
+	if contains(out.String(), "\"a\"") || contains(stderr, "\"a\"") {
+		t.Errorf("a value reached the terminal:\nstdout %q\nstderr %q", out.String(), stderr)
 	}
-	if contains(stderr, "\"a\"") || contains(stderr, "hunter") {
-		t.Errorf("a value reached stderr: %q", stderr)
+}
+
+func TestSetDryRunWithNothingToChangeExitsZero(t *testing.T) {
+	setupKeyedTempDir(t)
+	if err, _, _ := runSet(t, "stable", ".env", "API_KEY", "-"); err != nil {
+		t.Fatalf("initial set: %v", err)
+	}
+
+	out := &bytes.Buffer{}
+	resetSet(t, out, "stable")
+	rootCmd.SetArgs([]string{"-q", "set", ".env", "--dry-run", "--if-changed", "API_KEY", "-"})
+	var err error
+	captureStdStreams(t, func() { err = rootCmd.Execute() })
+
+	if err != nil {
+		t.Fatalf("--dry-run with no change must exit 0: %v", err)
+	}
+	if want := "unchanged\tAPI_KEY\t.env\n"; out.String() != want {
+		t.Errorf("stdout = %q, want %q", out.String(), want)
 	}
 }
 
@@ -737,5 +765,177 @@ func TestSetUsesTheGlobalFileTarget(t *testing.T) {
 	}
 	if got := envOf(t, "other.env")["API_KEY"]; got != "other" {
 		t.Errorf("API_KEY in other.env = %q, want %q", got, "other")
+	}
+}
+
+// --- plan 06: bring `set` in line with the rest of the CLI --------------------
+
+// `set` is a write path, and the one a pub-key-only developer uses: the bytes
+// of the target are the assertion, because they cannot check their own work.
+func TestSetRefusesADefectiveTargetAndWritesNothing(t *testing.T) {
+	setupKeyedTempDir(t)
+	writeFile(t, "d.env", "A=ENC[oops\nB=1\n", 0644)
+	before := readFile(t, "d.env")
+
+	err, _, _ := runSet(t, "v", "d.env", "B", "-")
+	if err == nil {
+		t.Fatal("set into a file with an unterminated marker must fail, like encrypt and check do")
+	}
+	if !contains(err.Error(), "d.env:1:3") {
+		t.Errorf("the error should carry file:line:col; got %v", err)
+	}
+	if after := readFile(t, "d.env"); !bytes.Equal(before, after) {
+		t.Errorf("the defective target was rewritten:\nbefore %q\n after %q", before, after)
+	}
+}
+
+func TestSetFromEnvPayloadErrorNamesStdinAndNotRun(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	err, _, _ := runSet(t, "A=1\nnot an assignment\n", "x.env", "--from-env", "-")
+	if err == nil {
+		t.Fatal("a malformed payload line must be rejected")
+	}
+	if !contains(err.Error(), stdinDisplayName+":2:1") {
+		t.Errorf("the error should locate the line in <stdin>; got %v", err)
+	}
+	if contains(err.Error(), "`run`") || contains(err.Error(), "skipped") {
+		t.Errorf("the error describes `run`, a command the user did not invoke: %v", err)
+	}
+	if _, statErr := os.Stat("x.env"); !os.IsNotExist(statErr) {
+		t.Error("x.env should not have been created")
+	}
+}
+
+func TestSetWarnsOnAnUnmatchedTrailingBracketButStillWrites(t *testing.T) {
+	setupKeyedTempDir(t)
+	writeFile(t, ".env", "A=ENC[ab]cd]\n", 0644)
+
+	err, _, stderr := runSet(t, "v", ".env", "B", "-")
+	if err != nil {
+		t.Fatalf("an ambiguous-but-legal marker must not block the write: %v", err)
+	}
+	if !contains(stderr, "unmatched ']'") {
+		t.Errorf("expected the ambiguity warning encrypt would give; stderr %q", stderr)
+	}
+	if got := string(readFile(t, ".env")); !contains(got, "B=ENC[v1:") {
+		t.Errorf("the write did not happen: %q", got)
+	}
+}
+
+func TestSetFollowsASymlinkedTarget(t *testing.T) {
+	setupKeyedTempDir(t)
+	writeFile(t, "real.env", "A=1\n", 0600)
+	if err := os.Symlink("real.env", "link.env"); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if err, _, _ := runSet(t, "x", "link.env", "A", "-"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	if info, err := os.Lstat("link.env"); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("link.env is no longer a symlink: the link was replaced instead of followed")
+	}
+	if got := string(readFile(t, "real.env")); !contains(got, "A=ENC[v1:") {
+		t.Errorf("the symlink's target was not updated: %q", got)
+	}
+	info, err := os.Stat("real.env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0600 {
+		t.Errorf("target mode = %#o, want 0600 preserved", mode)
+	}
+	if got := envOf(t, "link.env")["A"]; got != "x" {
+		t.Errorf("A via the link = %q, want %q", got, "x")
+	}
+}
+
+func TestSetRefusesADanglingSymlink(t *testing.T) {
+	setupKeyedTempDir(t)
+	if err := os.Symlink("nowhere.env", "dangling.env"); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	err, _, _ := runSet(t, "x", "dangling.env", "A", "-")
+	if err == nil {
+		t.Fatal("a dangling symlink must be an explicit error, not a new regular file")
+	}
+	if !contains(err.Error(), "symlink") {
+		t.Errorf("the error should say why; got %v", err)
+	}
+	if _, statErr := os.Stat("nowhere.env"); !os.IsNotExist(statErr) {
+		t.Error("the dangling target was created")
+	}
+	if info, err := os.Lstat("dangling.env"); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Error("the dangling link itself was replaced")
+	}
+}
+
+// In payload mode the lone positional is a file. One that looks like a KEY is a
+// typo, and the wrong outcome is a file named MYKEY full of secrets.
+func TestSetPayloadModeRejectsAPositionalThatLooksLikeAKey(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	err, _, _ := runSet(t, `{"A":"1"}`, "--from-json", "MYKEY", "-")
+	if err == nil {
+		t.Fatal("`set --from-json MYKEY -` must not succeed")
+	}
+	if !contains(err.Error(), "--from-json takes a file, not a key") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat("MYKEY"); !os.IsNotExist(statErr) {
+		t.Error("a file named MYKEY was created")
+	}
+
+	// The documented route around a false rejection.
+	if err, _, _ := runSet(t, `{"A":"1"}`, "--from-json", "./MYKEY", "-"); err != nil {
+		t.Fatalf("./MYKEY should be accepted as a path: %v", err)
+	}
+	if got := envOf(t, "MYKEY")["A"]; got != "1" {
+		t.Errorf("A = %q, want %q", got, "1")
+	}
+}
+
+func TestSetEmptyPayloadValueErrorNamesTheKeyNotStdin(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	err, _, _ := runSet(t, `{"A":""}`, "y.env", "--from-json", "-")
+	if err == nil {
+		t.Fatal("an empty payload value must be refused without --allow-empty")
+	}
+	if !contains(err.Error(), "for A") || !contains(err.Error(), "--from-json payload") {
+		t.Errorf("the error should name the key and the payload; got %v", err)
+	}
+	if contains(err.Error(), "stdin carried no bytes") {
+		t.Errorf("stdin carried a perfectly good payload; the error claims otherwise: %v", err)
+	}
+	if _, statErr := os.Stat("y.env"); !os.IsNotExist(statErr) {
+		t.Error("y.env should not have been created")
+	}
+}
+
+func TestSetTerminalRefusalDoesNotSuggestAFilePath(t *testing.T) {
+	setupKeyedTempDir(t)
+
+	orig := isTerminal
+	isTerminal = func(*os.File) bool { return true }
+	t.Cleanup(func() { isTerminal = orig })
+
+	resetSet(t, nil, "")
+	rootCmd.SetIn(os.Stdin)
+	t.Cleanup(func() { rootCmd.SetIn(os.Stdin) })
+	rootCmd.SetArgs([]string{"set", ".env", "API_KEY", "-"})
+	err := rootCmd.Execute()
+
+	if err == nil {
+		t.Fatal("expected the terminal refusal")
+	}
+	if contains(err.Error(), "pass a file path") {
+		t.Errorf("set cannot take the value from a file; the remedy is wrong: %v", err)
+	}
+	if !contains(err.Error(), "pipe") {
+		t.Errorf("the remedy should tell the user to pipe the value: %v", err)
 	}
 }

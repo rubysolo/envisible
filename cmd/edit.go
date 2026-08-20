@@ -95,9 +95,8 @@ var editCmd = &cobra.Command{
 		warnAmbiguousMarkers(targetFile, editedContent)
 
 		// 6. Write back to original file
-		err = os.WriteFile(targetFile, encrypted, 0644)
-		if err != nil {
-			return fmt.Errorf("failed to write file: %w", err)
+		if err := writeFileAtomic(targetFile, encrypted, newFileMode); err != nil {
+			return err
 		}
 
 		ui.Success("File %s updated and encrypted.", targetFile)
