@@ -62,7 +62,10 @@ separator is accepted but not required.`,
 
 		// Prepare command
 		childCmd := exec.Command(args[0], args[1:]...)
-		childCmd.Env = os.Environ()
+		// The child gets the decrypted values, never the key that decrypts them.
+		// A file that itself defines ENVISIBLE_KEY is honored: extraEnv is
+		// appended after the inherited one has been dropped.
+		childCmd.Env = childEnviron()
 		for k, v := range extraEnv {
 			childCmd.Env = append(childCmd.Env, fmt.Sprintf("%s=%s", k, v))
 		}

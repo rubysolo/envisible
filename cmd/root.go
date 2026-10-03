@@ -82,7 +82,7 @@ func resolvePrivateKeyMaterial(cmd *cobra.Command) string {
 	if flagChanged(cmd, "key") {
 		return ""
 	}
-	return strings.TrimSpace(os.Getenv("ENVISIBLE_KEY"))
+	return strings.TrimSpace(os.Getenv(privateKeyEnvVar))
 }
 
 // flagChanged reports whether the named flag was explicitly set on the command
