@@ -70,7 +70,11 @@ wait_for_run() {
   local conclusion
   conclusion="$(gh run view "$id" --repo "$repo" --json status,conclusion --jq '"\(.status)/\(.conclusion)"')"
   if [ "$conclusion" != "completed/success" ]; then
-    gh run view "$id" --repo "$repo" --log-failed 2>/dev/null | tail -20 >&2 || true
+    # The failed step's own output, without the job/step/timestamp columns
+    # and the runner's group markers.
+    gh run view "$id" --repo "$repo" --log-failed 2>/dev/null \
+      | sed -E 's/^.*[0-9]Z //' | grep -Ev '^(##\[(group|endgroup)\]|shell: |env:|  [A-Z_]+: \*\*\*)' \
+      | tail -8 | sed 's/^/    /' >&2 || true
     fail "the $what run did not succeed ($conclusion): https://github.com/$repo/actions/runs/$id"
   fi
 }
@@ -108,7 +112,9 @@ else
   changelog_ready=false
   unreleased="$(awk '/^## \[Unreleased\]$/ { on = 1; next } on && /^## \[/ { exit } on && /[^[:space:]]/ { print }' CHANGELOG.md)"
   [ -n "$unreleased" ] || fail "CHANGELOG.md has nothing under [Unreleased]: there is nothing to release"
-  ok "CHANGELOG.md has $(printf '%s\n' "$unreleased" | grep -c '^- ') entries under [Unreleased]"
+  entries="$(printf '%s\n' "$unreleased" | grep -c '^- ' || true)"
+  if [ "$entries" = "1" ]; then entries="1 entry"; else entries="$entries entries"; fi
+  ok "CHANGELOG.md has $entries under [Unreleased]"
 fi
 
 # ---------------------------------------------------------------- 2. tap token
