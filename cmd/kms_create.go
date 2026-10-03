@@ -36,22 +36,31 @@ var (
 // invoking real cloud APIs. Restore the original via defer in test setup.
 var createProviderKey = createProviderKeyReal
 
+// The provider packages' CreateKey entry points, as package-level vars so
+// cmd-level tests can capture the params createProviderKeyReal builds from the
+// flags without cloud credentials — the same pattern as aws.newKMSClient.
+var (
+	gcpCreateKey   = gcpkms.CreateKey
+	awsCreateKey   = awskms.CreateKey
+	azureCreateKey = azurekms.CreateKey
+)
+
 func createProviderKeyReal(ctx context.Context, kind kms.ProviderKind) (string, error) {
 	switch kind {
 	case kms.GCP:
-		return gcpkms.CreateKey(ctx, gcpkms.CreateKeyParams{
+		return gcpCreateKey(ctx, gcpkms.CreateKeyParams{
 			Project:  gcpCreateProject,
 			Location: gcpCreateLocation,
 			Keyring:  gcpCreateKeyring,
 			Name:     kmsCreateName,
 		})
 	case kms.AWS:
-		return awskms.CreateKey(ctx, awskms.CreateKeyParams{
+		return awsCreateKey(ctx, awskms.CreateKeyParams{
 			Region: awsCreateRegion,
 			Alias:  awsCreateAlias,
 		})
 	case kms.Azure:
-		return azurekms.CreateKey(ctx, azurekms.CreateKeyParams{
+		return azureCreateKey(ctx, azurekms.CreateKeyParams{
 			Vault: azCreateVault,
 			Name:  kmsCreateName,
 		})
