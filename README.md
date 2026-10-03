@@ -99,7 +99,7 @@ Use the `run` command to execute your application. Envisible will decrypt the se
 
 ```bash
 # Injects decrypted values into the environment
-envisible run -e .env -- npm start
+envisible run -f .env -- npm start
 ```
 
 *Note: For non-environment variable use cases (like config files), you can decrypt to a temporary file or use the `decrypt` command.*

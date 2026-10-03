@@ -187,34 +187,34 @@ one that runs `envisible check` against all candidate files.
 This is project-specific. Common patterns:
 
 ### Env-style files (`.env`)
-For apps that read env vars at startup, prefix the plaintext launch command with `envisible run -e <envfile> --`:
+For apps that read env vars at startup, prefix the plaintext launch command with `envisible run -f <envfile> --`:
 
 ```bash
 # before
 node server.js
 # after
-envisible run -e .env -- node server.js
+envisible run -f .env -- node server.js
 ```
 
 In `package.json`:
 ```json
 {
   "scripts": {
-    "start": "envisible run -e .env -- node server.js",
-    "dev": "envisible run -e .env.development -- nodemon server.js"
+    "start": "envisible run -f .env -- node server.js",
+    "dev": "envisible run -f .env.development -- nodemon server.js"
   }
 }
 ```
 
 In `Procfile`:
 ```
-web: envisible run -e .env -- gunicorn app:app
+web: envisible run -f .env -- gunicorn app:app
 ```
 
 In a `Makefile`:
 ```makefile
 run:
-	envisible run -e .env -- ./bin/myapp
+	envisible run -f .env -- ./bin/myapp
 ```
 
 In `docker-compose.yml`, mount the key and prefix the command:
@@ -226,7 +226,7 @@ services:
       - ./envisible.key:/app/envisible.key:ro
       - ./envisible.pub:/app/envisible.pub:ro
       - ./.env:/app/.env:ro
-    command: envisible run -e .env -- ./myapp
+    command: envisible run -f .env -- ./myapp
 ```
 
 ### Config files (yaml / json / toml)
@@ -279,7 +279,7 @@ Store the contents of `envisible.key` (the single base64 line `keygen` writes) a
 - name: Run tests
   env:
     ENVISIBLE_KEY: ${{ secrets.ENVISIBLE_KEY }}
-  run: envisible run -e .env.test -- npm test
+  run: envisible run -f .env.test -- npm test
 ```
 
 Scope `ENVISIBLE_KEY` to the steps that decrypt, not the whole job. Don't `echo` it. envisible never includes the value in errors, but a shell `set -x` will print it.
@@ -301,7 +301,7 @@ Authenticate the runner to the cloud (workload identity federation for GitHub Ac
   with:
     workload_identity_provider: ...
     service_account: ...
-- run: envisible run -e .env.test -- npm test
+- run: envisible run -f .env.test -- npm test
 ```
 
 In both cases, add a **lint job** in CI that runs `envisible check` against all candidate files so unencrypted markers fail PRs:
@@ -336,7 +336,7 @@ Add a short section to the project README (or a `SECRETS.md`) covering:
 
 - [ ] No plaintext form of any encrypted secret remains in the repo. Grep for old values.
 - [ ] `envisible check <file>` passes on every modified file.
-- [ ] `envisible run -e .env -- env | grep <KEY>` prints the expected decrypted value.
+- [ ] `envisible run -f .env -- env | grep <KEY>` prints the expected decrypted value.
 - [ ] `git status` shows `envisible.pub` staged and `envisible.key` **not** present (local mode) — check `git check-ignore -v envisible.key`.
 - [ ] The app's normal start command, prefixed with `envisible run`, boots successfully.
 - [ ] CI changes pass on a draft branch before merging.
@@ -364,7 +364,7 @@ Add a short section to the project README (or a `SECRETS.md`) covering:
 | Install (Homebrew) | `brew tap rubysolo/tools && brew install envisible` |
 | Generate local keypair | `envisible keygen` |
 | Generate keypair, private key to stdout only (no `envisible.key`) | `envisible keygen --print-key \| <secret-store-put>` |
-| Decrypt with key supplied by value | `ENVISIBLE_KEY=<base64> envisible run -e <envfile> -- <cmd>` |
+| Decrypt with key supplied by value | `ENVISIBLE_KEY=<base64> envisible run -f <envfile> -- <cmd>` |
 | Init from existing KMS key | `envisible kms init --provider {gcp,aws,azure} --resource <ref>` |
 | Provision KMS key | `envisible kms create --provider gcp --project P --location L --keyring R --name K` |
 | Encrypt in place | `envisible encrypt -i <file>` |
@@ -372,7 +372,7 @@ Add a short section to the project README (or a `SECRETS.md`) covering:
 | Decrypt to stdout, no markers | `envisible decrypt --strip <file>` |
 | Silence informational banner on stderr | `envisible -q <subcommand> ...` |
 | Edit in `$EDITOR` (decrypt → edit → encrypt) | `envisible edit <file>` |
-| Run with decrypted env injected | `envisible run -e <envfile> -- <cmd> <args...>` |
+| Run with decrypted env injected | `envisible run -f <envfile> -- <cmd> <args...>` |
 | CI lint for unencrypted markers | `for f in <files>; do envisible check "$f"; done` |
 | Install pre-commit hook | `envisible git install-hook` |
 | Set up git diff driver | `envisible git setup` |
