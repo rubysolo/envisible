@@ -71,6 +71,7 @@ var editCmd = &cobra.Command{
 
 		ui.Info("Opening %s in %s...", targetFile, editor)
 		editorCmd := exec.Command(editor, tmpPath)
+		editorCmd.Env = childEnviron()
 		editorCmd.Stdin = os.Stdin
 		editorCmd.Stdout = cmd.OutOrStdout()
 		editorCmd.Stderr = cmd.ErrOrStderr()

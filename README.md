@@ -194,7 +194,7 @@ envisible keygen --print-key | secret-store set envisible-key
 Not strictly. It is **differently** safe, and the trade is worth making on purpose:
 
 - **Better:** no disk artifact. Nothing to back up, index, `scp`, or find still sitting there in 2027.
-- **Worse:** on Linux, `/proc/<pid>/environ` exposes it to any process running as the same user, and it is inherited by every child process unless the caller scopes it.
+- **Worse:** on Linux, `/proc/<pid>/environ` exposes it to any process running as the same user, and whatever shell or runner exported it passes it to everything else it starts. (Envisible itself does not pass it on; see below.)
 - **Roughly equal:** anything already running as you can read either one.
 
 The mitigation is **scoping, and it belongs to the caller**. A store that injects the material into a single child process puts it in exactly one environment and never in the parent shell:
@@ -204,6 +204,13 @@ secret-store exec envisible-key --as ENVISIBLE_KEY -- envisible run -- npm start
 ```
 
 A CI runner that exports the same variable globally for the whole job gets the weaker version of this. Envisible cannot tell the two apart; the env var is a better provisioning *mechanism*, not an upgrade on its own.
+
+**Envisible does not pass the key on.** `ENVISIBLE_KEY` is removed from the environment of every process envisible starts: the command under `run`, `$EDITOR` under `edit`, and `git`. In the example above, `npm start` receives the decrypted values and not the key that decrypts them, so a compromised dependency can read the secrets it was given but cannot decrypt the rest of the repository. Two consequences:
+
+- A child that itself calls `envisible` (a script under `run` that decrypts a second file) no longer inherits the key. Decrypt both files in the outer command, or provision the key to the inner call explicitly.
+- Only the inherited variable is dropped. An env file that defines its own `ENVISIBLE_KEY=...` entry is passed to the child like any other entry.
+
+`ENVISIBLE_KEY_PATH`, `ENVISIBLE_PUB_PATH` and `ENVISIBLE_FILE` are paths, not secrets, and are inherited as usual.
 
 ## Values are delivered byte-exactly
 

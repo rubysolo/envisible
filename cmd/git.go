@@ -65,6 +65,7 @@ func runGit(args ...string) error {
 		return err
 	}
 	c := exec.Command("git", args...)
+	c.Env = childEnviron()
 	c.Dir = wd
 	return c.Run()
 }
