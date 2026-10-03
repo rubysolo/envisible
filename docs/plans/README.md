@@ -14,6 +14,11 @@ root stays the high-level roadmap; these are the detailed designs behind individ
 | 04 | [Private key by value](04-key-material-by-value.md) | Feature — let a secret manager hold `envisible.key` | — |
 | 05 | [`envisible set`](05-envisible-set.md) | Feature — write a secret into a file without the plaintext ever being in it | 03 (shares stdin intake) |
 | 06 | [`set` command hardening](06-set-command-hardening.md) | Correctness — `set` diverges from the CLI's own conventions | 01–05 (all landed) |
+| 07 | [Pin the wire formats and decrypt-failure semantics](07-core-crypto-test-hardening.md) | **Test hardening, security-critical** — no golden ciphertext; tamper/wrong-key paths unasserted | — |
+| 08 | [KMS test hardening](08-kms-test-hardening.md) | Test hardening — rotate atomicity, descriptor validation, provider request shapes | — |
+| 09 | [AWS: region from the key ARN](09-aws-region-from-arn.md) | **Correctness fix** — AWS decrypt ignores the region in the ARN | — |
+| 10 | [CLI contract tests](10-cli-contract-tests.md) | Test hardening — stream split, env/flag resolution, `check`/hook failure paths | — |
+| 11 | [Test-suite hygiene](11-test-suite-hygiene.md) | Test hardening — tests that pass by returning early, leaked flag state | 10 |
 
 ## Suggested landing order
 
@@ -36,6 +41,22 @@ root stays the high-level roadmap; these are the detailed designs behind individ
 let secret content inject extra variables into the child environment. Either ship 01 and 02
 together, or include the one-line interim guard in 01 (step 5) that turns that case into a
 loud error. Same applies to 05, which can also produce multi-line values.
+
+## Plans 07–11: the test-coverage audit
+
+Line coverage was already 85–94% in every package when these were written, and it was
+hiding real gaps: the `ENVISIBLE_KEY` resolver had full line coverage and no test asserting
+its behavior, because every command test ran it incidentally. The audit therefore asked
+*would any test fail if this broke*, and answered it by mutation: each plan's Evidence table
+lists single-line changes that leave `go test ./...` green. A plan is done when every
+mutation in its table fails at least one test.
+
+```
+07 ─┐
+08 ─┤ independent; 07 first — it guards the frozen wire formats
+09 ─┘ (production fix; coordinates with 08 on the AWS fake)
+10 ──► 11   (11 builds on 10's test-harness change)
+```
 
 ## Motivation: secrets that live in an external store
 
