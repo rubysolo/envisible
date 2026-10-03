@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/rubysolo/envisible/pkg/crypto"
 	"github.com/rubysolo/envisible/pkg/ui"
@@ -13,6 +14,11 @@ import (
 // printKey is the --print-key flag: emit the private key on stdout instead of
 // writing envisible.key, so it can be piped straight into a secret store.
 var printKey bool
+
+// forceKeygen is the --force flag: replace an existing key file. Without it
+// keygen refuses, because the old private key is the only thing that can
+// decrypt what was encrypted with it.
+var forceKeygen bool
 
 // keygenStdoutIsTTY reports whether the process stdout is attached to a
 // terminal. Indirected through a variable so tests can simulate both answers.
@@ -32,6 +38,23 @@ var keygenCmd = &cobra.Command{
 		// The one thing worse than a key file is a key in scrollback.
 		if printKey && keygenStdoutIsTTY() {
 			return errors.New("refusing to print the private key to a terminal: redirect stdout, e.g. `envisible keygen --print-key | your-secret-store set envisible-key`")
+		}
+
+		// A new keypair over an existing one is not recoverable: every secret
+		// encrypted to the old public key needs the old private key, and this
+		// is the command that would destroy it. An existing public key alone
+		// counts too. It may be the only half this machine is meant to have, or
+		// a KMS descriptor, and replacing it silently redirects every future
+		// encrypt.
+		if !forceKeygen {
+			targets := []string{pubKeyPath}
+			if !printKey {
+				targets = append(targets, privKeyPath)
+			}
+			if existing := existingPaths(targets); len(existing) > 0 {
+				return fmt.Errorf("%s already exist%s: a new keypair cannot decrypt anything encrypted with the old one. Pass --force to replace it",
+					strings.Join(existing, " and "), map[bool]string{true: "s", false: ""}[len(existing) == 1])
+			}
 		}
 
 		pub, priv, err := crypto.GenerateKeypair()
@@ -91,6 +114,19 @@ var keygenCmd = &cobra.Command{
 	},
 }
 
+// existingPaths returns the paths that already exist, in the order given. Lstat,
+// so a dangling symlink counts: something is there, and keygen would write
+// through or over it.
+func existingPaths(paths []string) []string {
+	var found []string
+	for _, p := range paths {
+		if _, err := os.Lstat(p); err == nil {
+			found = append(found, p)
+		}
+	}
+	return found
+}
+
 // restorePublicKey undoes a public-key write after the matching private key
 // could not be written: it puts the previous contents back, or removes the file
 // if there was none. It returns nil when the public key is back as it was.
@@ -111,6 +147,7 @@ func restorePublicKey(old []byte, readErr error) error {
 }
 
 func init() {
+	keygenCmd.Flags().BoolVar(&forceKeygen, "force", false, "replace existing key files (secrets encrypted with the old keypair become undecryptable)")
 	keygenCmd.Flags().BoolVar(&printKey, "print-key", false, "write the private key to stdout instead of a file (refused when stdout is a terminal)")
 	rootCmd.AddCommand(keygenCmd)
 }

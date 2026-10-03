@@ -67,6 +67,8 @@ If they're unsure, recommend local for now — migration to KMS later is mechani
 envisible keygen           # writes envisible.pub and envisible.key
 ```
 
+If `keygen` refuses because `envisible.pub` or `envisible.key` already exists, **stop and ask the user**. The project already has a keypair (or a KMS public key), and existing secrets depend on it. Do not pass `--force` on your own: it replaces the keypair, and anything encrypted with the old one becomes undecryptable.
+
 Then:
 
 1. **Add `envisible.key` to `.gitignore`** if not already covered. If `*.key` is already ignored, you're good — but verify with `git check-ignore -v envisible.key`.

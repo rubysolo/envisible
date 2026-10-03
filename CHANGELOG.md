@@ -24,6 +24,7 @@ decrypts with every later one.
   `ENVISIBLE_KEY`, then `ENVISIBLE_KEY_PATH`, then `envisible.key`.
 - **`keygen --print-key`** writes the new private key to stdout and creates no
   `envisible.key`. It refuses to print to a terminal.
+- **`keygen --force`** replaces existing key files.
 - **`run --pass-key`** leaves an inherited `ENVISIBLE_KEY` in the command's environment, for
   a command that calls envisible itself.
 - **`-` as a file argument** for `encrypt`, `decrypt` and `check` reads from stdin, so a
@@ -38,6 +39,10 @@ decrypts with every later one.
 
 ### Changed
 
+- **Breaking:** `keygen` refuses to run when `envisible.pub` or `envisible.key` already
+  exists, and says so. A new keypair cannot decrypt anything encrypted with the old one, and
+  `keygen` used to replace both files silently. Pass `--force` to replace them. With
+  `--print-key`, only the public key path is checked.
 - **Breaking:** `run`, `edit` and the `git` helpers no longer pass `ENVISIBLE_KEY` to the
   programs they start. The child gets the decrypted values, not the key. Use
   `run --pass-key` to opt back in.

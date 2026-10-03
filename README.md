@@ -70,6 +70,8 @@ envisible keygen
 #   Private: envisible.key
 ```
 
+`keygen` refuses to run if either key file already exists, because a new keypair cannot decrypt anything encrypted with the old one. To replace a keypair on purpose, decrypt your files first, then run `envisible keygen --force` and encrypt them again.
+
 ### 2. Add Secrets
 Edit your configuration file and wrap sensitive values in `ENC[...]`.
 
