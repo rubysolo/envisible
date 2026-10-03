@@ -38,6 +38,10 @@ func resetRoot(out io.Writer) {
 	inplace = false
 	stripMarkers = false
 	textconv = false
+	printKey = false
+	// Normally recomputed by PersistentPreRunE, but tests that call
+	// loadDecryptor directly would otherwise see whatever the last command left.
+	privKeyMaterial = ""
 	// kms init / create flag vars persist across cobra Execute calls because
 	// they're package-level — reset them so subsequent tests start clean.
 	kmsInitProvider, kmsInitResource = "", ""

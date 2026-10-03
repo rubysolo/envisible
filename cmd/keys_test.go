@@ -335,3 +335,42 @@ func TestLoadDecryptorWarnsOnPermissiveKeyFile(t *testing.T) {
 		}
 	})
 }
+
+// TestDecryptMixedV1V2WithKeyMaterial: a file mid-migration holds both v1 and v2
+// markers. With a v2 envisible.pub and the v1 private key supplied as
+// ENVISIBLE_KEY (no key file), decrypt must open both kinds in one pass.
+func TestDecryptMixedV1V2WithKeyMaterial(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	rsaPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	resource := "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
+	defer withFakeKMSProvider(t, kms.GCP, rsaPriv, resource)()
+	info := &kms.PublicKeyInfo{Kind: kms.GCP, Resource: resource, Alg: kms.RSAOAEPSHA256_2048, PubKey: &rsaPriv.PublicKey}
+	if err := kms.WritePublicKey("envisible.pub", info); err != nil {
+		t.Fatalf("WritePublicKey: %v", err)
+	}
+
+	naclPub, naclPriv := mustKeypair(t)
+	v2Inner, err := processor.NewEnvelopeEncryptor(kms.NewRSAWrapper(&rsaPriv.PublicKey)).EncryptValue([]byte("kms-value"))
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+	env := "OLD=ENC[" + sealV1(t, naclPub, "nacl-value") + "]\nNEW=ENC[" + v2Inner + "]\n"
+	if err := os.WriteFile(".env", []byte(env), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ENVISIBLE_KEY", envcrypto.EncodeKey(naclPriv))
+
+	out, err := decryptStripped(t)
+	if err != nil {
+		t.Fatalf("decrypt mixed file: %v", err)
+	}
+	for _, want := range []string{"OLD=nacl-value", "NEW=kms-value"} {
+		if !contains(out, want) {
+			t.Errorf("decrypt output missing %q, got %q", want, out)
+		}
+	}
+}
