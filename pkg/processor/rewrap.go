@@ -69,8 +69,11 @@ func rewrapV2Inner(ctx context.Context, inner string, oldUnwrapper kms.Unwrapper
 	if err != nil {
 		return "", fmt.Errorf("rewrap: base64 decode: %w", err)
 	}
-	if len(blob) <= oldWrappedSize {
-		return "", fmt.Errorf("rewrap: ciphertext too short for wrapped key size %d", oldWrappedSize)
+	// The same minimum decrypt enforces. Anything shorter could be re-wrapped
+	// (only the leading wrapped key is touched) but could never be decrypted,
+	// before or after: rotating it would report success over a dead value.
+	if minLen := v2MinBlobLen(oldWrappedSize); len(blob) < minLen {
+		return "", fmt.Errorf("rewrap: ciphertext too short (%d < %d)", len(blob), minLen)
 	}
 	oldWrapped := blob[:oldWrappedSize]
 	tail := blob[oldWrappedSize:] // nonce + secretbox ciphertext, untouched

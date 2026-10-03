@@ -90,18 +90,35 @@ again):
 		childCmd.Stdout = cmd.OutOrStdout()
 		childCmd.Stderr = cmd.ErrOrStderr()
 
-		// Handle signals
+		// Register for signals before starting the child, so one that arrives
+		// during startup waits in the channel instead of killing envisible and
+		// orphaning the child.
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-		go func() {
-			sig := <-sigs
-			if childCmd.Process != nil {
-				childCmd.Process.Signal(sig)
-			}
-		}()
+		defer signal.Stop(sigs)
 
 		ui.Success("Starting: %s", strings.Join(args, " "))
-		err = childCmd.Run()
+		if err := childCmd.Start(); err != nil {
+			return err
+		}
+
+		// Forward every SIGINT/SIGTERM for as long as the child runs, not just
+		// the first: a child that ignores or is slow to act on one signal must
+		// still be reachable by the next. Started only after Start has set
+		// childCmd.Process, so the goroutine never reads it mid-write.
+		done := make(chan struct{})
+		go func() {
+			for {
+				select {
+				case sig := <-sigs:
+					childCmd.Process.Signal(sig)
+				case <-done:
+					return
+				}
+			}
+		}()
+		err = childCmd.Wait()
+		close(done)
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				os.Exit(exitErr.ExitCode())
