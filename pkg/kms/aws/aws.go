@@ -11,6 +11,7 @@ package aws
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -35,16 +36,40 @@ type kmsAPI interface {
 // newKMSClient builds the read-path SDK client. It's a package var rather than
 // a direct call so tests can inject a fake and exercise newUnwrapper/fetchPublicKey
 // end-to-end without live AWS credentials.
-var newKMSClient = func(ctx context.Context) (kmsAPI, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+//
+// KMS keys are regional, so an ARN-form resource is authoritative for the region
+// and overrides the ambient SDK chain (AWS_REGION, the active profile). A bare
+// key ID or alias name carries no region and falls back to that chain.
+var newKMSClient = func(ctx context.Context, resource string) (kmsAPI, error) {
+	var opts []func(*config.LoadOptions) error
+	if region := regionFromResource(resource); region != "" {
+		opts = append(opts, config.WithRegion(region))
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("aws kms: load default config: %w", err)
+	}
+	if cfg.Region == "" {
+		// Caught here rather than at request time, where the SDK reports an
+		// opaque "Missing Region" endpoint-resolution error.
+		return nil, fmt.Errorf("aws kms: no region for resource %q — use the full key ARN, or set AWS_REGION", resource)
 	}
 	return awskms.NewFromConfig(cfg), nil
 }
 
+// regionFromResource returns the region embedded in an ARN-form resource
+// (arn:<partition>:kms:<region>:<account>:key/<id> or :alias/<name>),
+// or "" for a bare key ID or alias name.
+func regionFromResource(resource string) string {
+	parts := strings.SplitN(resource, ":", 6)
+	if len(parts) < 6 || parts[0] != "arn" || parts[2] != "kms" {
+		return ""
+	}
+	return parts[3]
+}
+
 func newUnwrapper(ctx context.Context, info *kms.PublicKeyInfo) (kms.Unwrapper, error) {
-	client, err := newKMSClient(ctx)
+	client, err := newKMSClient(ctx, info.Resource)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +100,7 @@ func (u *unwrapper) Unwrap(ctx context.Context, wrapped []byte) ([]byte, error) 
 }
 
 func fetchPublicKey(ctx context.Context, resource string) (*kms.PublicKeyInfo, error) {
-	client, err := newKMSClient(ctx)
+	client, err := newKMSClient(ctx, resource)
 	if err != nil {
 		return nil, err
 	}
