@@ -69,6 +69,12 @@ decrypts with every later one.
   it back in the clear.
 - `version` and the `git setup` progress message now respect the output rule: results on
   stdout, informational messages on stderr.
+- `run` forwards every `SIGINT` and `SIGTERM` to the command for as long as it runs.
+  Previously only the first was forwarded and later ones were swallowed, so a command that
+  did not exit on the first signal could only be stopped with `SIGKILL`. A signal arriving
+  while the command was starting could also be lost.
+- `kms rotate` rejects a `v2` value that is too short to decrypt, and aborts. Previously a
+  value truncated inside its nonce or payload was re-wrapped and counted as rotated.
 
 ## [0.0.7] - 2026-07-10
 

@@ -3,10 +3,12 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -384,12 +386,9 @@ i=0
 while [ "$i" -lt 100 ]; do sleep 0.05; i=$((i+1)); done
 exit 0`
 	child := exec.Command(os.Args[0], "-q", "run", "--", "sh", "-c", script)
-	// GORACE: under `go test -race` the re-executed binary is race-instrumented
-	// too, and run.go's signal goroutine reads childCmd.Process with no
-	// synchronisation against exec.Cmd.Start writing it. The detector reports
-	// that and would turn the exit status into 66; this test is about whether
-	// the signal is forwarded, so the report is kept out of the exit code.
-	child.Env = append(os.Environ(), runAsCLIEnv+"=1", "GORACE=exitcode=0")
+	// Under `go test -race` the re-executed binary is race-instrumented too, so
+	// a data race in run's signal handling makes it exit 66 and fails this test.
+	child.Env = append(os.Environ(), runAsCLIEnv+"=1")
 	var stderr bytes.Buffer
 	child.Stderr = &stderr
 	if err := child.Start(); err != nil {
@@ -431,5 +430,70 @@ exit 0`
 	}
 	if elapsed := time.Since(start); elapsed > 4*time.Second {
 		t.Errorf("run took %v to exit after SIGTERM; the child ran to its own deadline instead of being signalled", elapsed)
+	}
+}
+
+// `run` forwards every signal for as long as the child runs, not only the
+// first. It used to read one signal and stop listening while still holding the
+// handler, so a child that did not exit on the first SIGTERM could not be
+// reached by a second: envisible swallowed it. The child here needs three.
+func TestRunForwardsEverySignalNotJustTheFirst(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not found on PATH")
+	}
+	setupRunFixture(t)
+
+	// Exits 0 on the third TERM, or at its own deadline if they never arrive,
+	// so `run` never sees a non-zero child either way.
+	const script = `n=0
+trap 'n=$((n+1)); echo "$n" > got-count; if [ "$n" -ge 3 ]; then exit 0; fi' TERM
+: > ready
+i=0
+while [ "$i" -lt 200 ]; do sleep 0.05; i=$((i+1)); done
+exit 0`
+	child := exec.Command(os.Args[0], "-q", "run", "--", "sh", "-c", script)
+	child.Env = append(os.Environ(), runAsCLIEnv+"=1")
+	var stderr bytes.Buffer
+	child.Stderr = &stderr
+	if err := child.Start(); err != nil {
+		t.Fatalf("starting envisible run: %v", err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		if !waited {
+			child.Process.Kill()
+			child.Wait()
+		}
+	})
+
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !ok() {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s; stderr: %s", what, stderr.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitFor("the child to install its trap", func() bool {
+		_, err := os.Stat("ready")
+		return err == nil
+	})
+
+	for want := 1; want <= 3; want++ {
+		if err := child.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatalf("signal %d: %v", want, err)
+		}
+		waitFor(fmt.Sprintf("the child to receive SIGTERM number %d", want), func() bool {
+			got, _ := os.ReadFile("got-count")
+			return strings.TrimSpace(string(got)) == strconv.Itoa(want)
+		})
+	}
+
+	err := child.Wait()
+	waited = true
+	if err != nil {
+		t.Errorf("envisible run exited with %v, want 0; stderr: %s", err, stderr.String())
 	}
 }
