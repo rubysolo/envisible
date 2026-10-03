@@ -343,12 +343,15 @@ aws kms create-key \
 # (note the KeyId from the output)
 aws kms create-alias --alias-name alias/my-app --target-key-id <KEY_ID>
 
-# Register with envisible — full ARN or alias ARN both work
+# Register with envisible — full ARN or alias ARN both work; prefer an ARN over
+# a bare key ID or alias name, since the ARN carries the key's region
 envisible kms init --provider aws \
     --resource arn:aws:kms:us-east-1:123456789012:key/<KEY_ID>
 ```
 
 Auth: the AWS SDK's standard credential chain — env vars, `~/.aws/credentials`, IMDSv2 on EC2, IRSA in EKS, SSO. Required actions: `kms:GetPublicKey` for init, `kms:Decrypt` at runtime.
+
+Region: taken from the key or alias ARN, which overrides `AWS_REGION` and the active profile — KMS keys are regional, so no region needs to be configured to decrypt. A bare key ID or `alias/name` has no region in it and falls back to the standard SDK region settings (`AWS_REGION`, `AWS_DEFAULT_REGION`, the profile's `region`).
 
 **Azure Key Vault** — create an RSA-2048 key:
 

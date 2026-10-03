@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -190,7 +191,7 @@ func TestUnwrapperPropagatesAPIError(t *testing.T) {
 
 // swapKMSClient replaces the package-level read-path client constructor with fn
 // and returns a restore func suitable for t.Cleanup.
-func swapKMSClient(fn func(context.Context) (kmsAPI, error)) func() {
+func swapKMSClient(fn func(context.Context, string) (kmsAPI, error)) func() {
 	prev := newKMSClient
 	newKMSClient = fn
 	return func() { newKMSClient = prev }
@@ -198,19 +199,28 @@ func swapKMSClient(fn func(context.Context) (kmsAPI, error)) func() {
 
 func TestNewUnwrapperThroughInjectedClient(t *testing.T) {
 	_, api := newFakeAPI(t)
-	t.Cleanup(swapKMSClient(func(context.Context) (kmsAPI, error) { return api, nil }))
+	var gotResource string
+	t.Cleanup(swapKMSClient(func(_ context.Context, resource string) (kmsAPI, error) {
+		gotResource = resource
+		return api, nil
+	}))
 
-	u, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{Resource: "arn:aws:kms:::key/x"})
+	resource := "arn:aws:kms:::key/x"
+	u, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{Resource: resource})
 	if err != nil {
 		t.Fatalf("newUnwrapper: %v", err)
 	}
 	if u == nil {
 		t.Fatal("newUnwrapper returned a nil unwrapper")
 	}
+	// The client is built per resource so its region can come from the ARN.
+	if gotResource != resource {
+		t.Errorf("newKMSClient resource = %q, want %q", gotResource, resource)
+	}
 }
 
 func TestNewUnwrapperClientError(t *testing.T) {
-	t.Cleanup(swapKMSClient(func(context.Context) (kmsAPI, error) {
+	t.Cleanup(swapKMSClient(func(context.Context, string) (kmsAPI, error) {
 		return nil, errors.New("no credentials")
 	}))
 	if _, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{Resource: "x"}); err == nil {
@@ -220,12 +230,19 @@ func TestNewUnwrapperClientError(t *testing.T) {
 
 func TestFetchPublicKeyThroughInjectedClient(t *testing.T) {
 	priv, api := newFakeAPI(t)
-	t.Cleanup(swapKMSClient(func(context.Context) (kmsAPI, error) { return api, nil }))
+	var gotResource string
+	t.Cleanup(swapKMSClient(func(_ context.Context, resource string) (kmsAPI, error) {
+		gotResource = resource
+		return api, nil
+	}))
 
 	resource := "arn:aws:kms:us-east-1:123456789012:key/abcd"
 	info, err := fetchPublicKey(context.Background(), resource)
 	if err != nil {
 		t.Fatalf("fetchPublicKey: %v", err)
+	}
+	if gotResource != resource {
+		t.Errorf("newKMSClient resource = %q, want %q", gotResource, resource)
 	}
 	if info.PubKey.N.Cmp(priv.PublicKey.N) != 0 {
 		t.Error("returned public key does not match the fake's key")
@@ -233,7 +250,7 @@ func TestFetchPublicKeyThroughInjectedClient(t *testing.T) {
 }
 
 func TestFetchPublicKeyClientError(t *testing.T) {
-	t.Cleanup(swapKMSClient(func(context.Context) (kmsAPI, error) {
+	t.Cleanup(swapKMSClient(func(context.Context, string) (kmsAPI, error) {
 		return nil, errors.New("no credentials")
 	}))
 	if _, err := fetchPublicKey(context.Background(), "x"); err == nil {
@@ -245,10 +262,139 @@ func TestFetchPublicKeyClientError(t *testing.T) {
 // round-trip (the AWS SDK resolves credentials lazily, on first call). Exercising
 // them directly covers the real wiring rather than only the injected fakes.
 func TestDefaultClientConstructorsAreOffline(t *testing.T) {
-	if c, err := newKMSClient(context.Background()); err != nil || c == nil {
+	if c, err := newKMSClient(context.Background(), "arn:aws:kms:us-east-1:123456789012:key/abcd"); err != nil || c == nil {
 		t.Fatalf("newKMSClient: client=%v err=%v", c, err)
 	}
 	if c, err := newCreatorClient(context.Background(), "us-east-1"); err != nil || c == nil {
 		t.Fatalf("newCreatorClient: client=%v err=%v", c, err)
+	}
+}
+
+func TestRegionFromResource(t *testing.T) {
+	tests := []struct {
+		name     string
+		resource string
+		want     string
+	}{
+		{"key ARN", "arn:aws:kms:eu-west-1:123456789012:key/abcd1234-ab12-cd34-ef56-1234567890ab", "eu-west-1"},
+		{"alias ARN", "arn:aws:kms:us-west-2:123456789012:alias/my-app", "us-west-2"},
+		{"aws-cn partition", "arn:aws-cn:kms:cn-north-1:123456789012:key/abcd", "cn-north-1"},
+		{"aws-us-gov partition", "arn:aws-us-gov:kms:us-gov-west-1:123456789012:key/abcd", "us-gov-west-1"},
+		{"alias name containing colons", "arn:aws:kms:ap-south-1:123456789012:alias/team:app", "ap-south-1"},
+		{"bare key UUID", "abcd1234-ab12-cd34-ef56-1234567890ab", ""},
+		{"bare alias name", "alias/my-app", ""},
+		{"wrong service", "arn:aws:s3:us-east-1:123456789012:bucket/key", ""},
+		{"not an ARN prefix", "urn:aws:kms:us-east-1:123456789012:key/abcd", ""},
+		{"empty", "", ""},
+		{"too few segments", "arn:aws:kms:us-east-1", ""},
+		{"missing resource segment", "arn:aws:kms:us-east-1:123456789012", ""},
+		{"empty region field", "arn:aws:kms::123456789012:key/abcd", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := regionFromResource(tt.resource); got != tt.want {
+				t.Errorf("regionFromResource(%q) = %q, want %q", tt.resource, got, tt.want)
+			}
+		})
+	}
+}
+
+// isolateAWSEnv points the real SDK config chain at nothing: no shared config
+// or credentials files, no IMDS, no profile, and no ambient region. Dummy static
+// credentials are set so nothing tries to resolve any. The tests that use it
+// only inspect the constructed client; no request is ever sent.
+func isolateAWSEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", "/dev/null")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+	// t.Setenv first so the original value is restored on cleanup, then unset.
+	for _, name := range []string{"AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "AWS_SESSION_TOKEN"} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unsetenv %s: %v", name, err)
+		}
+	}
+}
+
+// clientRegion returns the region the real SDK client was configured with.
+func clientRegion(t *testing.T, api kmsAPI) string {
+	t.Helper()
+	client, ok := api.(*awskms.Client)
+	if !ok {
+		t.Fatalf("newKMSClient returned %T, want *awskms.Client", api)
+	}
+	return client.Options().Region
+}
+
+// The region embedded in an ARN is authoritative: KMS keys are regional, so the
+// request has to go to the key's region whatever the ambient SDK chain says.
+func TestNewKMSClientTakesRegionFromARN(t *testing.T) {
+	const resource = "arn:aws:kms:eu-west-1:123456789012:key/abcd1234-ab12-cd34-ef56-1234567890ab"
+
+	t.Run("no ambient region", func(t *testing.T) {
+		isolateAWSEnv(t)
+		client, err := newKMSClient(context.Background(), resource)
+		if err != nil {
+			t.Fatalf("newKMSClient: %v", err)
+		}
+		if got := clientRegion(t, client); got != "eu-west-1" {
+			t.Errorf("client region = %q, want %q", got, "eu-west-1")
+		}
+	})
+
+	t.Run("overrides AWS_REGION", func(t *testing.T) {
+		isolateAWSEnv(t)
+		t.Setenv("AWS_REGION", "us-east-1")
+		client, err := newKMSClient(context.Background(), resource)
+		if err != nil {
+			t.Fatalf("newKMSClient: %v", err)
+		}
+		if got := clientRegion(t, client); got != "eu-west-1" {
+			t.Errorf("client region = %q, want %q", got, "eu-west-1")
+		}
+	})
+}
+
+// A resource with no region in it keeps the ambient SDK region, as before.
+func TestNewKMSClientNonARNUsesAmbientRegion(t *testing.T) {
+	for _, resource := range []string{"abcd1234-ab12-cd34-ef56-1234567890ab", "alias/my-app"} {
+		t.Run(resource, func(t *testing.T) {
+			isolateAWSEnv(t)
+			t.Setenv("AWS_REGION", "ap-southeast-2")
+			client, err := newKMSClient(context.Background(), resource)
+			if err != nil {
+				t.Fatalf("newKMSClient: %v", err)
+			}
+			if got := clientRegion(t, client); got != "ap-southeast-2" {
+				t.Errorf("client region = %q, want %q", got, "ap-southeast-2")
+			}
+		})
+	}
+}
+
+// With no region in the resource and none in the environment, fail up front
+// with something actionable instead of the SDK's "Missing Region" at call time.
+func TestNewKMSClientNoRegionAnywhere(t *testing.T) {
+	isolateAWSEnv(t)
+	const resource = "abcd1234-ab12-cd34-ef56-1234567890ab"
+
+	client, err := newKMSClient(context.Background(), resource)
+	if err == nil {
+		t.Fatalf("expected a no-region error, got client %v", client)
+	}
+	want := `aws kms: no region for resource "` + resource + `" — use the full key ARN, or set AWS_REGION`
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+
+	// The same error reaches both callers of the constructor.
+	if _, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{Resource: resource}); err == nil || err.Error() != want {
+		t.Errorf("newUnwrapper error = %v, want %q", err, want)
+	}
+	if _, err := fetchPublicKey(context.Background(), resource); err == nil || err.Error() != want {
+		t.Errorf("fetchPublicKey error = %v, want %q", err, want)
 	}
 }
