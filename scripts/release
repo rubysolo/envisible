@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# Cut a release.
+#
+#   scripts/release v0.0.9             # do it
+#   scripts/release --dry-run v0.0.9   # run every check, change nothing
+#
+# In order:
+#   1. Check the working tree: on main, clean, level with origin, tag unused,
+#      version newer than the latest tag, go.mod tidy.
+#   2. Check the Homebrew tap token, by running the release-preflight workflow
+#      on GitHub (the token is a repository secret and cannot be read here).
+#   3. Move the changelog's [Unreleased] section under the new version, commit
+#      and push it. Skipped when the version already has a section.
+#   4. Wait for the Test workflow to pass on that commit.
+#   5. Tag and push the tag, which starts the Release workflow.
+#   6. Wait for the Release workflow, then confirm the GitHub release has its
+#      archives and the Homebrew tap points at the new version.
+#
+# Everything that can fail without publishing anything runs before step 5.
+# --dry-run performs steps 1 and 2 and reports what 3 to 6 would do.
+set -euo pipefail
+
+repo="rubysolo/envisible"
+tap="rubysolo/homebrew-tools"
+formula="envisible.rb"
+
+dry_run=false
+tag=""
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) dry_run=true ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "scripts/release: unknown option $arg" >&2; exit 2 ;;
+    *)  [ -z "$tag" ] || { echo "scripts/release: more than one version given" >&2; exit 2; }; tag="$arg" ;;
+  esac
+done
+[ -n "$tag" ] || { echo "usage: scripts/release [--dry-run] vX.Y.Z" >&2; exit 2; }
+version="${tag#v}"
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+
+step() { printf '\n==> %s\n' "$*"; }
+ok()   { printf '    ✔ %s\n' "$*"; }
+note() { printf '    %s\n' "$*"; }
+fail() { printf '\n✖ %s\n' "$*" >&2; exit 1; }
+
+for tool in git gh go awk; do
+  command -v "$tool" >/dev/null || fail "$tool is required and was not found on PATH"
+done
+
+# wait_for_run WORKFLOW JQ_FILTER DESCRIPTION
+# Finds the newest run of WORKFLOW matching JQ_FILTER (a jq boolean over one run
+# object), waits for it to finish, and fails if it did not succeed.
+wait_for_run() {
+  local workflow="$1" filter="$2" what="$3" id="" tries=0
+  while [ -z "$id" ]; do
+    id="$(gh run list --repo "$repo" --workflow "$workflow" --limit 10 \
+      --json databaseId,headSha,headBranch,event,createdAt \
+      --jq "[.[] | select($filter)][0].databaseId // empty")"
+    [ -n "$id" ] && break
+    tries=$((tries + 1))
+    [ "$tries" -lt 30 ] || fail "no $what run appeared after waiting; check https://github.com/$repo/actions"
+    sleep 4
+  done
+  note "run: https://github.com/$repo/actions/runs/$id"
+  # Watch until it finishes, then read the conclusion directly: the watch exit
+  # status is not a reliable verdict for a run that had already completed.
+  gh run watch "$id" --repo "$repo" --interval 10 >/dev/null 2>&1 || true
+  local conclusion
+  conclusion="$(gh run view "$id" --repo "$repo" --json status,conclusion --jq '"\(.status)/\(.conclusion)"')"
+  if [ "$conclusion" != "completed/success" ]; then
+    gh run view "$id" --repo "$repo" --log-failed 2>/dev/null | tail -20 >&2 || true
+    fail "the $what run did not succeed ($conclusion): https://github.com/$repo/actions/runs/$id"
+  fi
+}
+
+# ---------------------------------------------------------------- 1. local checks
+step "Checking the working tree"
+[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "version must look like v1.2.3, got \"$tag\""
+gh auth status >/dev/null 2>&1 || fail "gh is not logged in; run: gh auth login"
+
+branch="$(git rev-parse --abbrev-ref HEAD)"
+[ "$branch" = "main" ] || fail "releases are cut from main; this is $branch"
+[ -z "$(git status --porcelain)" ] || fail "the working tree has uncommitted changes"
+git fetch --quiet origin --tags
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || fail "main is not level with origin/main; push or pull first"
+ok "on main, clean, level with origin/main"
+
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+  fail "tag $tag already exists"
+fi
+latest="$(git tag --list 'v*' --sort=-v:refname | head -1)"
+if [ -n "$latest" ]; then
+  newest="$(printf '%s\n%s\n' "$latest" "$tag" | sort -V | tail -1)"
+  [ "$newest" = "$tag" ] || fail "$tag is not newer than the latest tag $latest"
+fi
+ok "$tag is unused and follows ${latest:-no earlier tag}"
+
+go mod tidy -diff >/dev/null 2>&1 || fail "go.mod or go.sum is not tidy (GoReleaser would refuse a dirty tree); run: go mod tidy"
+ok "go.mod is tidy"
+
+if grep -q "^## \[$version\]" CHANGELOG.md; then
+  changelog_ready=true
+  scripts/release-notes "$tag" >/dev/null || fail "CHANGELOG.md has a [$version] heading with nothing under it"
+  ok "CHANGELOG.md already has a [$version] section"
+else
+  changelog_ready=false
+  unreleased="$(awk '/^## \[Unreleased\]$/ { on = 1; next } on && /^## \[/ { exit } on && /[^[:space:]]/ { print }' CHANGELOG.md)"
+  [ -n "$unreleased" ] || fail "CHANGELOG.md has nothing under [Unreleased]: there is nothing to release"
+  ok "CHANGELOG.md has $(printf '%s\n' "$unreleased" | grep -c '^- ') entries under [Unreleased]"
+fi
+
+# ---------------------------------------------------------------- 2. tap token
+step "Checking the Homebrew tap token (runs on GitHub)"
+# Run ids only increase, so "newer than the last one" identifies the run this
+# starts without depending on the local clock agreeing with GitHub's.
+last_preflight="$(gh run list --repo "$repo" --workflow release-preflight.yml --limit 1 --json databaseId --jq '.[0].databaseId // 0')"
+gh workflow run release-preflight.yml --repo "$repo" --ref main >/dev/null \
+  || fail "could not start the release-preflight workflow"
+wait_for_run release-preflight.yml ".databaseId > ${last_preflight:-0}" "token preflight"
+ok "the tap token is valid and can write to $tap"
+
+if $dry_run; then
+  step "Dry run: stopping before any change"
+  $changelog_ready || note "would move [Unreleased] under [$version] - $(date -u +%Y-%m-%d), commit and push to main"
+  note "would wait for the Test workflow on that commit"
+  note "would create the annotated tag $tag and push it"
+  note "would wait for the Release workflow and verify the release and the tap"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- 3. changelog
+if ! $changelog_ready; then
+  step "Updating CHANGELOG.md"
+  scripts/changelog-release "$tag"
+  git add CHANGELOG.md
+  git commit --quiet -m "docs: changelog for $tag"
+  git push --quiet origin main
+  ok "committed and pushed $(git rev-parse --short HEAD)"
+fi
+
+# ---------------------------------------------------------------- 4. CI
+step "Waiting for the Test workflow on $(git rev-parse --short HEAD)"
+sha="$(git rev-parse HEAD)"
+wait_for_run test.yml ".headSha == \"$sha\"" "Test"
+ok "tests passed"
+
+# ---------------------------------------------------------------- 5. tag
+step "Tagging $tag"
+git tag -a "$tag" -m "$tag"
+git push --quiet origin "$tag"
+ok "pushed $tag"
+
+# ---------------------------------------------------------------- 6. release
+step "Waiting for the Release workflow"
+wait_for_run release.yml ".headBranch == \"$tag\"" "Release"
+ok "release workflow finished"
+
+step "Verifying"
+assets="$(gh release view "$tag" --repo "$repo" --json assets --jq '.assets | length')"
+[ "$assets" -ge 7 ] || fail "the GitHub release has $assets assets, expected 7 (six archives and checksums.txt)"
+ok "GitHub release has $assets assets"
+
+tap_version="$(gh api "repos/$tap/contents/$formula" --jq .content | base64 --decode | awk -F'"' '/^  version "/ { print $2 }')"
+[ "$tap_version" = "$version" ] || fail "the Homebrew formula is at ${tap_version:-unknown}, expected $version"
+ok "Homebrew formula is at $tap_version"
+
+printf '\n%s released: https://github.com/%s/releases/tag/%s\n' "$tag" "$repo" "$tag"

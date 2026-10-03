@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Move the [Unreleased] section of CHANGELOG.md under a new version.
+#
+#   scripts/changelog-release v0.0.9            # dated today (UTC)
+#   scripts/changelog-release v0.0.9 2026-11-02
+#
+# Renames "## [Unreleased]" to "## [X.Y.Z] - DATE", starts a fresh, empty
+# [Unreleased] above it, and updates the compare links at the bottom of the
+# file. Edits CHANGELOG.md in place; it does not commit.
+#
+# Refuses when [Unreleased] is empty (there is nothing to release) or when the
+# version already has a section.
+set -euo pipefail
+
+[ $# -ge 1 ] && [ $# -le 2 ] || { echo "usage: scripts/changelog-release vX.Y.Z [YYYY-MM-DD]" >&2; exit 2; }
+tag="$1"
+version="${tag#v}"
+date="${2:-$(date -u +%Y-%m-%d)}"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+changelog="$root/CHANGELOG.md"
+
+fail() { echo "scripts/changelog-release: $*" >&2; exit 1; }
+
+[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "version must look like v1.2.3, got \"$tag\""
+[[ "$date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || fail "date must be YYYY-MM-DD, got \"$date\""
+grep -q '^## \[Unreleased\]$' "$changelog" || fail "CHANGELOG.md has no \"## [Unreleased]\" heading"
+if grep -q "^## \[$version\]" "$changelog"; then
+  fail "CHANGELOG.md already has a section for $version"
+fi
+
+unreleased="$(awk '
+  /^## \[Unreleased\]$/ { on = 1; next }
+  on && /^## \[/        { exit }
+  on && /[^[:space:]]/  { print }
+' "$changelog")"
+[ -n "$unreleased" ] || fail "the [Unreleased] section is empty: there is nothing to release"
+
+# The link line names the previous release: [Unreleased]: .../compare/vPREV...HEAD
+link="$(grep '^\[Unreleased\]: ' "$changelog" || true)"
+[[ "$link" =~ ^\[Unreleased\]:\ (.*)/compare/(v[0-9.]+)\.\.\.HEAD$ ]] || fail "cannot parse the [Unreleased] compare link: \"$link\""
+base="${BASH_REMATCH[1]}"
+prev="${BASH_REMATCH[2]}"
+
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+awk -v version="$version" -v date="$date" -v base="$base" -v prev="$prev" -v tag="$tag" '
+  /^## \[Unreleased\]$/ {
+    print
+    print ""
+    print "## [" version "] - " date
+    next
+  }
+  /^\[Unreleased\]: / {
+    print "[Unreleased]: " base "/compare/" tag "...HEAD"
+    print "[" version "]: " base "/compare/" prev "..." tag
+    next
+  }
+  { print }
+' "$changelog" > "$tmp"
+cat "$tmp" > "$changelog"
+echo "CHANGELOG.md: [Unreleased] is now [$version] - $date (previous release $prev)"

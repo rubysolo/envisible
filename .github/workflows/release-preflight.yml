@@ -1,0 +1,24 @@
+name: Release preflight
+
+# Checks what a release needs but a local machine cannot see: that the Homebrew
+# tap token stored as a repository secret is still valid and can write to the
+# tap. `scripts/release` starts this and waits for it before it creates a tag. It
+# can also be run by hand from the Actions tab at any time.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tap-token:
+    name: Homebrew tap token
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tap token
+        run: scripts/check-tap-token
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

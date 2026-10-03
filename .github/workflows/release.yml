@@ -17,6 +17,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      # GoReleaser publishes the GitHub release before it updates the Homebrew
+      # tap. Check the tap token first, so an expired one fails the run before
+      # anything is public.
+      - name: Check the Homebrew tap token
+        run: scripts/check-tap-token
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+      # The release page shows this version's section of CHANGELOG.md. Written
+      # outside the checkout: GoReleaser refuses to run on a dirty tree.
+      - name: Write release notes from the changelog
+        run: scripts/release-notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -27,7 +40,7 @@ jobs:
         with:
           distribution: goreleaser
           version: latest
-          args: release --clean
+          args: release --clean --release-notes ${{ runner.temp }}/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
