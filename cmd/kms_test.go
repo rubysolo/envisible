@@ -77,9 +77,7 @@ func withFakeKMSProvider(t *testing.T, kind kms.ProviderKind, priv *rsa.PrivateK
 
 func TestKmsInitFetchesAndWritesPubkey(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -133,9 +131,7 @@ func TestKmsInitFetchesAndWritesPubkey(t *testing.T) {
 
 func TestKmsInitRejectsUnknownProvider(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"kms", "init", "--provider", "vault", "--resource", "whatever"})
@@ -146,9 +142,7 @@ func TestKmsInitRejectsUnknownProvider(t *testing.T) {
 
 func TestKmsInitRequiresFlags(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"kms", "init"})
@@ -159,9 +153,7 @@ func TestKmsInitRequiresFlags(t *testing.T) {
 
 func TestKmsCreateDispatchAndBootstrap(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -206,9 +198,7 @@ func TestKmsCreateDispatchAndBootstrap(t *testing.T) {
 
 func TestKmsCreateRejectsIncompleteGCPFlags(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"kms", "create", "--provider", "gcp", "--project", "p"})
@@ -219,9 +209,7 @@ func TestKmsCreateRejectsIncompleteGCPFlags(t *testing.T) {
 
 func TestKmsCreateRejectsIncompleteAzureFlags(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"kms", "create", "--provider", "azure", "--vault", "myvault"})
@@ -267,9 +255,7 @@ func (p *keyedFakeProvider) install(t *testing.T, kind kms.ProviderKind) func() 
 
 func TestKmsRotateRewrapsFileAndUpdatesPubkey(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	oldPriv, _ := rsa.GenerateKey(rand.Reader, 2048)
 	newPriv, _ := rsa.GenerateKey(rand.Reader, 2048)
@@ -343,9 +329,7 @@ func TestKmsRotateRewrapsFileAndUpdatesPubkey(t *testing.T) {
 
 func TestKmsRotateRejectsV1Pubkey(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// Stand up a legacy v1 project via the existing keygen path.
 	resetRoot(nil)
@@ -363,9 +347,7 @@ func TestKmsRotateRejectsV1Pubkey(t *testing.T) {
 
 func TestKmsRotateRequiresTo(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"kms", "rotate"})

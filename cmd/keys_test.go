@@ -17,12 +17,14 @@ import (
 )
 
 // withKeyPaths points the package-level pubKeyPath/privKeyPath at the given
-// values for the duration of a test, restoring the originals afterward.
+// values for the duration of a test, restoring the originals afterward. It also
+// clears privKeyMaterial: an earlier test that ran a command with ENVISIBLE_KEY
+// set leaves the material behind, and it outranks the key file these paths name.
 func withKeyPaths(t *testing.T, pub, priv string) {
 	t.Helper()
-	origPub, origPriv := pubKeyPath, privKeyPath
-	pubKeyPath, privKeyPath = pub, priv
-	t.Cleanup(func() { pubKeyPath, privKeyPath = origPub, origPriv })
+	origPub, origPriv, origMaterial := pubKeyPath, privKeyPath, privKeyMaterial
+	pubKeyPath, privKeyPath, privKeyMaterial = pub, priv, ""
+	t.Cleanup(func() { pubKeyPath, privKeyPath, privKeyMaterial = origPub, origPriv, origMaterial })
 }
 
 func writeV1Pub(t *testing.T, path string) {

@@ -17,26 +17,13 @@ import (
 
 // --- plan 05: `envisible set` ------------------------------------------------
 
-// setOwnFlags are the flags declared by `set` itself. Named explicitly so the
-// reset below cannot reach the root's persistent flags, which resetRoot owns.
-var setOwnFlags = []string{"from-json", "from-env", "dry-run", "if-changed", "raw", "allow-empty"}
-
-// resetSet wires stdin and clears `set`'s own flags. Cobra keeps a flag's value
-// on the command object between Execute calls, so without this a --dry-run in
-// one test would silently make a later test write nothing.
+// resetSet wires stdin and resets every flag. Cobra keeps a flag's value on the
+// command object between Execute calls, so without the reset a --dry-run in one
+// test would silently make a later test write nothing; resetRoot covers `set`'s
+// own flags along with everyone else's.
 func resetSet(t *testing.T, out io.Writer, stdin string) {
 	t.Helper()
 	resetRootWithStdin(t, out, stdin)
-	for _, name := range setOwnFlags {
-		f := setCmd.Flags().Lookup(name)
-		if f == nil {
-			t.Fatalf("set has no --%s flag", name)
-		}
-		if err := f.Value.Set(f.DefValue); err != nil {
-			t.Fatalf("reset --%s: %v", name, err)
-		}
-		f.Changed = false
-	}
 }
 
 // runSet executes `envisible set ...` with stdin, returning the error and
@@ -268,11 +255,7 @@ func withCountingKMS(t *testing.T, priv *rsa.PrivateKey, resource string, calls 
 
 func TestSetInKMSModeWritesV2MarkersWithoutCallingTheKMS(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chdir(oldWd) })
+	t.Chdir(tmpDir)
 
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

@@ -332,8 +332,6 @@ func newWrongKeyFixture(t *testing.T) envKeyFixture {
 // TestCheckVerifyReportsAValueTheKeyCannotOpen: the marker is well-formed, so
 // only --verify can tell it is sealed to a key nobody here holds.
 func TestCheckVerifyReportsAValueTheKeyCannotOpen(t *testing.T) {
-	// --verify is a package-level flag var that resetRoot does not clear.
-	t.Cleanup(func() { verify = false })
 	const verified = "are encrypted and verified"
 
 	t.Run("wrong key", func(t *testing.T) {
