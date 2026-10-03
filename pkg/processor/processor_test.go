@@ -536,7 +536,10 @@ func TestEvidenceRowTrailingBracket(t *testing.T) {
 	if len(defects) != 0 {
 		t.Fatalf("unexpected defects: %+v", defects)
 	}
-	if bytes.Contains(encrypted, []byte("cd")) {
+	// A leak would leave the tail outside the marker: ENC[v1:...]cd]. Look for
+	// "]cd", not "cd": the ciphertext is random base64, which contains "cd" by
+	// chance a few percent of the time and never contains ']'.
+	if bytes.Contains(encrypted, []byte("]cd")) || bytes.Count(encrypted, []byte("]")) != 1 {
 		t.Errorf("part of the secret stayed in the file as plaintext: %s", encrypted)
 	}
 	stripped, err := DecryptContent(ctx, encrypted, dec, false)
