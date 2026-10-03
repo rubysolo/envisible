@@ -64,30 +64,57 @@ func resolveWriteTarget(path string) (string, error) {
 // symlink-correct but truncates before it writes, so an interrupted
 // `encrypt -i` on a large file could leave a half-written secret behind.
 func writeFileAtomic(path string, data []byte, createMode os.FileMode) error {
-	target, err := resolveWriteTarget(path)
+	staged, err := stageFile(path, data, createMode, true)
 	if err != nil {
 		return err
 	}
+	return staged.commit()
+}
 
-	mode := createMode
+// renameFile is os.Rename, indirected so a test can make the final step of a
+// staged write fail.
+var renameFile = os.Rename
+
+// stagedFile is a fully written, synced temp file waiting to be renamed over
+// its target. Staging is the step that fails in practice (a missing or
+// unwritable directory, a full disk); commit is a rename within one directory.
+// Splitting the two lets a caller that writes several files stage all of them
+// before replacing any, so a failure leaves every target as it was.
+type stagedFile struct {
+	path    string // as the caller named it, for messages
+	target  string // path with symlinks resolved
+	tmpPath string
+}
+
+// stageFile writes data to a temp file beside path's resolved target. With
+// keepExistingMode an existing target's permissions carry over to the new
+// file; without it the new file always gets mode.
+func stageFile(path string, data []byte, mode os.FileMode, keepExistingMode bool) (*stagedFile, error) {
+	target, err := resolveWriteTarget(path)
+	if err != nil {
+		return nil, err
+	}
+
 	if info, err := os.Stat(target); err == nil {
 		if info.IsDir() {
-			return fmt.Errorf("%s is a directory", path)
+			return nil, fmt.Errorf("%s is a directory", path)
 		}
-		mode = info.Mode().Perm()
+		if keepExistingMode {
+			mode = info.Mode().Perm()
+		}
 	}
 
 	dir := filepath.Dir(target)
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(target)+".envisible-*")
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
 
-	cleanup := func(err error) error {
+	cleanup := func(err error) (*stagedFile, error) {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return err
+		return nil, err
 	}
 	if _, err := tmp.Write(data); err != nil {
 		return cleanup(fmt.Errorf("failed to write temp file: %w", err))
@@ -100,11 +127,22 @@ func writeFileAtomic(path string, data []byte, createMode os.FileMode) error {
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("failed to close temp file: %w", err)
+		return nil, fmt.Errorf("failed to close temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, target); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to replace %s: %w", path, err)
+	return &stagedFile{path: path, target: target, tmpPath: tmpPath}, nil
+}
+
+// commit renames the staged file over its target. On failure the temp file is
+// removed and the target is untouched.
+func (s *stagedFile) commit() error {
+	if err := renameFile(s.tmpPath, s.target); err != nil {
+		os.Remove(s.tmpPath)
+		return fmt.Errorf("failed to replace %s: %w", s.path, err)
 	}
 	return nil
+}
+
+// discard removes a staged file that will not be committed.
+func (s *stagedFile) discard() {
+	os.Remove(s.tmpPath)
 }
