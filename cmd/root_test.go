@@ -19,7 +19,12 @@ func TestMain(m *testing.M) {
 	for _, name := range []string{"ENVISIBLE_KEY", "ENVISIBLE_KEY_PATH", "ENVISIBLE_PUB_PATH", "ENVISIBLE_FILE"} {
 		os.Unsetenv(name)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	// The CLI binary the pre-commit hook tests build, if any of them ran.
+	if cliBinDir != "" {
+		os.RemoveAll(cliBinDir)
+	}
+	os.Exit(code)
 }
 
 // envKeyFixture is a temp working dir holding envisible.pub and a .env whose one

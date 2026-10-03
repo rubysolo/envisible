@@ -18,12 +18,16 @@ import (
 	"github.com/spf13/pflag"
 )
 
+// resetRoot points the root command's stdout at out and restores every flag to
+// its default. It deliberately leaves stderr alone: cobra's stderr falls back to
+// os.Stderr, the same place ui.* writes, so a test can never mistake one stream
+// for the other. Use runRoot (or captureStdStreams) to read stderr.
 func resetRoot(out io.Writer) {
 	if out == nil {
 		out = io.Discard
 	}
 	rootCmd.SetOut(out)
-	rootCmd.SetErr(out)
+	rootCmd.SetErr(nil)
 	rootCmd.SetArgs(nil)
 	// Reset persistent flags to defaults
 	privKeyPath = "envisible.key"
@@ -50,6 +54,34 @@ func resetRoot(out io.Writer) {
 	awsCreateRegion, awsCreateAlias = "", ""
 	azCreateVault = ""
 	kmsRotateTo = ""
+}
+
+// runRoot executes args against a freshly reset rootCmd and returns what the
+// command wrote to its stdout and stderr writers separately.
+func runRoot(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	var out bytes.Buffer
+	resetRoot(&out)
+	return executeRoot(t, &out, args...)
+}
+
+// runRootWithStdin is runRoot for the commands that read "-".
+func runRootWithStdin(t *testing.T, stdin string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	var out bytes.Buffer
+	resetRootWithStdin(t, &out, stdin)
+	return executeRoot(t, &out, args...)
+}
+
+// executeRoot runs args on an already reset rootCmd whose stdout is out. ui.*
+// and cobra's stderr both write to os.Stderr rather than to a cobra writer, so
+// the process streams are swapped for pipes while the command runs. Anything
+// that bypasses cobra and prints straight to os.Stdout still counts as stdout.
+func executeRoot(t *testing.T, out *bytes.Buffer, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	rootCmd.SetArgs(args)
+	rawStdout, stderr := captureStdStreams(t, func() { err = rootCmd.Execute() })
+	return out.String() + rawStdout, stderr, err
 }
 
 func TestRootHelp(t *testing.T) {
@@ -317,6 +349,8 @@ func TestRunChildFlagsWithoutDashDash(t *testing.T) {
 }
 
 func TestGitIntegration(t *testing.T) {
+	isolateGit(t)
+
 	tmpDir, err := os.MkdirTemp("", "envisible-git")
 	if err != nil {
 		t.Fatal(err)
@@ -608,14 +642,8 @@ func TestEnvisibleFileEnvVar(t *testing.T) {
 	// 4. Set ENVISIBLE_FILE env var and run without specifying file
 	t.Setenv("ENVISIBLE_FILE", customEnvFile)
 
-	// Re-initialize filePath from env var (simulating fresh start)
-	filePath = os.Getenv("ENVISIBLE_FILE")
-
 	b := bytes.NewBufferString("")
 	resetRoot(b)
-	// Note: resetRoot sets filePath back to .env, so we need to set it again
-	filePath = customEnvFile
-
 	rootCmd.SetArgs([]string{"run", "--", "env"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Logf("run failed: %v", err)
@@ -764,10 +792,7 @@ func TestMissingFileErrorsWhenExplicitlySet(t *testing.T) {
 
 	// 3. Test that missing file via ENVISIBLE_FILE env var produces an error
 	t.Setenv("ENVISIBLE_FILE", "also-nonexistent.env")
-	filePath = "also-nonexistent.env" // Simulate what init() would do
-
 	resetRoot(nil)
-	filePath = "also-nonexistent.env" // resetRoot resets it, set again
 	rootCmd.SetArgs([]string{"run", "--", "echo", "hello"})
 	err = rootCmd.Execute()
 	if err == nil {
