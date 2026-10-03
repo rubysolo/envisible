@@ -87,12 +87,51 @@ func TestRewrapContentRejectsCorruptCiphertext(t *testing.T) {
 	_, _ = rand.Read(garbage)
 	content := []byte("BAD=ENC[v2:" + base64.StdEncoding.EncodeToString(garbage) + "]")
 
-	_, _, err := RewrapContent(context.Background(), content, unwrapper, priv.Size(), wrapper)
+	out, count, err := RewrapContent(context.Background(), content, unwrapper, priv.Size(), wrapper)
 	if err == nil {
-		t.Errorf("expected RewrapContent to fail on garbage ciphertext")
+		t.Fatalf("expected RewrapContent to fail on garbage ciphertext")
 	}
 	if !strings.Contains(err.Error(), "rewrap") {
 		t.Errorf("error message doesn't mention rewrap context: %v", err)
+	}
+	// Rotation is all-or-nothing: a failure returns no content at all, so
+	// there is nothing half-rotated for a caller to write.
+	if out != nil || count != 0 {
+		t.Errorf("failed rewrap returned content %q and count %d; want nil and 0", out, count)
+	}
+}
+
+// A file whose first marker rewraps and whose second does not must come back
+// empty-handed too, not as the first half of a rotation.
+func TestRewrapContentReturnsNothingOnPartialFailure(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	wrapper := newRSAWrapperForTest(&priv.PublicKey)
+	unwrapper := &localRSAUnwrapper{priv: priv}
+
+	good, err := NewEnvelopeEncryptor(wrapper).EncryptValue([]byte("fine"))
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+	cases := map[string]string{
+		"unwrap_fails":    flipInnerByte(t, good, 0),
+		"too_short":       zeroInner("v2:", 40),
+		"invalid_base64":  "v2:!!!not-base64",
+		"wrapped_dk_only": zeroInner("v2:", priv.Size()),
+	}
+	for name, bad := range cases {
+		t.Run(name, func(t *testing.T) {
+			content := []byte("GOOD=ENC[" + good + "]\nBAD=ENC[" + bad + "]\n")
+			out, count, err := RewrapContent(context.Background(), content, unwrapper, priv.Size(), wrapper)
+			if err == nil {
+				t.Fatalf("expected an error")
+			}
+			if !strings.Contains(err.Error(), "rewrap") {
+				t.Errorf("error message doesn't mention rewrap context: %v", err)
+			}
+			if out != nil || count != 0 {
+				t.Errorf("failed rewrap returned content %q and count %d; want nil and 0", out, count)
+			}
+		})
 	}
 }
 

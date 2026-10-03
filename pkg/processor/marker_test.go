@@ -676,3 +676,131 @@ func TestCiphertextModeRejectsBackslashBodies(t *testing.T) {
 }
 
 // --- regression: the multi-line heuristic ---
+
+// --- scanner edge cases pinned by docs/plans/07 ---
+
+// The same-line form of the swallow: a ciphertext marker missing its ']' with a
+// second marker further along the line. Scanning to the first ']' would fuse
+// the two into one "marker" whose body no decryptor accepts, and the healthy
+// ciphertext would vanish into it. The first token must be a reported defect
+// and the second a marker in its own right.
+func TestCiphertextBodyStopsAtTheNextOpenerOnTheSameLine(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		markers []wantMarker
+		defects []DefectKind
+	}{
+		{
+			name:    "ciphertext_then_ciphertext",
+			content: "a: ENC[v1:AAA b: ENC[v1:BBB=]",
+			markers: []wantMarker{{"ENC[v1:BBB=]", "v1:BBB=", true}},
+			defects: []DefectKind{MalformedCiphertext},
+		},
+		{
+			name:    "ciphertext_then_plaintext",
+			content: "a: ENC[v2:AAA b: ENC[hunter2]\n",
+			markers: []wantMarker{{"ENC[hunter2]", "hunter2", false}},
+			defects: []DefectKind{MalformedCiphertext},
+		},
+		{
+			name:    "adjacent_openers",
+			content: "ENC[v1:ENC[v1:BBB=]",
+			markers: []wantMarker{{"ENC[v1:BBB=]", "v1:BBB=", true}},
+			defects: []DefectKind{MalformedCiphertext},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, scan := range []func([]byte) ([]Marker, []Defect){ScanMarkers, Scan} {
+				markers, defects := scan([]byte(tc.content))
+				checkMarkers(t, tc.content, markers, tc.markers)
+				checkDefects(t, defects, tc.defects)
+				if len(defects) > 0 && defects[0].Offset != strings.Index(tc.content, markerPrefix) {
+					t.Errorf("defect at offset %d, want the first opener", defects[0].Offset)
+				}
+			}
+		})
+	}
+}
+
+// isCiphertextStart is the byte-slice twin of IsEncryptedInner. Marker.Encrypted
+// comes from the first and the rewriters' idea of "already encrypted" from the
+// second, so a prefix they disagree on is a marker that is never encrypted
+// (read as ciphertext) or one decrypted as if it were (read as plaintext).
+func TestCiphertextStartAgreesWithIsEncryptedInner(t *testing.T) {
+	prefixes := map[string]bool{
+		"v:":   false, // no digits: not a version
+		"v1":   false, // no colon
+		"v1:":  true,
+		"v2:":  true,
+		"v12:": true,
+		"v0:":  true,
+		"vx:":  false,
+		"V1:":  false, // the prefix is case-sensitive
+		"1:":   false,
+		"v1 :": false,
+		"v-1:": false,
+		"":     false,
+	}
+	for prefix, want := range prefixes {
+		// Bare, and followed by a body: the length guard must not be what
+		// answers for the short forms.
+		for _, inner := range []string{prefix, prefix + "secret", prefix + "AAA="} {
+			t.Run(inner, func(t *testing.T) {
+				start := isCiphertextStart([]byte(inner))
+				encrypted := IsEncryptedInner(inner)
+				if start != encrypted {
+					t.Errorf("isCiphertextStart = %v but IsEncryptedInner = %v", start, encrypted)
+				}
+				if start != want {
+					t.Errorf("isCiphertextStart(%q) = %v, want %v", inner, start, want)
+				}
+			})
+		}
+	}
+
+	// End to end: `ENC[v:secret]` is a plaintext marker waiting to be
+	// encrypted, not a ciphertext to leave alone.
+	content := []byte("TOKEN=ENC[v:secret]")
+	markers, defects := Scan(content)
+	checkDefects(t, defects, nil)
+	checkMarkers(t, string(content), markers, []wantMarker{{"ENC[v:secret]", "v:secret", false}})
+}
+
+// The "\v" escape exists for one job: keeping a plaintext that begins with a
+// version prefix out of ciphertext mode. It applies at offset 0 only, and only
+// in front of a real prefix. Every other "\v" is two literal bytes.
+func TestVersionEscapeAppliesOnlyAtOffsetZero(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"leading_before_a_prefix", `\v1:secret`, "v1:secret"},
+		{"leading_without_a_prefix", `\vsecret`, `\vsecret`},
+		{"mid_value", `a\vb`, `a\vb`},
+		// The leading escape is consumed; the later one, although it too
+		// sits in front of a version prefix, is not at offset 0.
+		{"leading_and_later", `\v1:x\v2:y`, `v1:x\v2:y`},
+		{"later_only_after_a_prefix_shaped_tail", `xv1:a\vb`, `xv1:a\vb`},
+		{"windows_path", `\v1:C:\vault\v2`, `v1:C:\vault\v2`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unescapeMarkerValue(tc.raw); got != tc.want {
+				t.Errorf("unescapeMarkerValue(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+
+			content := "K=" + wrapMarker(tc.raw)
+			markers, defects := Scan([]byte(content))
+			checkDefects(t, defects, nil)
+			checkMarkers(t, content, markers, []wantMarker{{wrapMarker(tc.raw), tc.want, false}})
+
+			// And the value survives being written back out.
+			if got := unescapeMarkerValue(escapeMarkerValue(tc.want)); got != tc.want {
+				t.Errorf("escape round trip of %q = %q", tc.want, got)
+			}
+		})
+	}
+}

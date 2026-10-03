@@ -32,8 +32,9 @@ There is no separate lint config beyond `go vet`; keep code `gofmt`-clean.
 ## Conventions
 
 - **Crypto is security-sensitive.** Do not change wire formats (`v1:` NaCl, `v2:` KMS envelope) or key handling without a clear reason; both formats are documented in `README.md` and must stay backward-compatible (mixed v1/v2 files are supported).
+- **Wire-format exemplars** live in `pkg/processor/testdata/` (ciphertext written by `v0.0.1` and `v0.0.5`). A failing exemplar test means the wire format changed; fix the code, never the exemplar. Add a new exemplar only alongside a new format version.
 - **Output streams:** decrypted content goes to **stdout**; all informational/banner output goes to **stderr**. Keep it that way so `$(envisible decrypt ...)` and pipes stay clean. The global `-q`/`--quiet` flag silences stderr chatter.
-- **Never commit secrets.** `envisible.key`, `*.key`, `*.pem`, and `*.env` are gitignored. `envisible.pub` is safe to commit. The repo's own pre-commit hook (`envisible git install-hook`) runs `envisible check`.
+- **Never commit secrets.** `envisible.key`, `*.key`, `*.pem`, and `*.env` are gitignored. The only exceptions are the fixed, test-only exemplar keys under `pkg/processor/testdata/`. `envisible.pub` is safe to commit. The repo's own pre-commit hook (`envisible git install-hook`) runs `envisible check`.
 - Match the surrounding Cobra command style when adding subcommands; register them in `cmd/root.go`.
 - Add or update tests next to the code you change (`*_test.go`); the KMS providers have per-provider test files.
 
