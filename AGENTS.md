@@ -41,3 +41,5 @@ There is no separate lint config beyond `go vet`; keep code `gofmt`-clean.
 ## Releasing
 
 Releases are cut from git tags via GoReleaser (`.goreleaser.yaml`) and published through `.github/workflows/release.yml`. Homebrew users install from `rubysolo/tools`.
+
+`CHANGELOG.md` has an entry for every release. Add user-visible changes to its `[Unreleased]` section in the same change that makes them. When cutting a release, rename `[Unreleased]` to the new version with the release date, start a fresh `[Unreleased]`, and update the compare links at the bottom of the file, before tagging.
