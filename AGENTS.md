@@ -42,6 +42,15 @@ There is no separate lint config beyond `go vet`; keep code `gofmt`-clean.
 
 ## Releasing
 
-Releases are cut from git tags via GoReleaser (`.goreleaser.yaml`) and published through `.github/workflows/release.yml`. Homebrew users install from `rubysolo/tools`.
+Run `scripts/release vX.Y.Z` from a clean `main` that is level with `origin/main`. `scripts/release --dry-run vX.Y.Z` runs every check and changes nothing. The script:
 
-`CHANGELOG.md` has an entry for every release. Add user-visible changes to its `[Unreleased]` section in the same change that makes them. When cutting a release, rename `[Unreleased]` to the new version with the release date, start a fresh `[Unreleased]`, and update the compare links at the bottom of the file, before tagging.
+1. Checks the working tree, that the tag is unused and newer than the latest, and that `go.mod` is tidy.
+2. Checks the Homebrew tap token by running the `Release preflight` workflow on GitHub. The token is a repository secret (`HOMEBREW_TAP_GITHUB_TOKEN`) and cannot be read locally. An expired token failed the v0.0.8 release after it was already published; this check and the same one at the start of the release workflow exist to stop that.
+3. Moves the `[Unreleased]` section of `CHANGELOG.md` under the new version (`scripts/changelog-release`), commits and pushes it.
+4. Waits for the Test workflow to pass on that commit.
+5. Creates and pushes the annotated tag. That starts `.github/workflows/release.yml`, which runs GoReleaser (`.goreleaser.yaml`): binaries for Linux, macOS and Windows, the GitHub release, and the Homebrew formula in `rubysolo/homebrew-tools` (users install from `rubysolo/tools`).
+6. Waits for the release workflow and confirms the release has its archives and the tap points at the new version.
+
+The GitHub release notes are that version's section of `CHANGELOG.md` (`scripts/release-notes`), so write the changelog for readers. Add user-visible changes to `[Unreleased]` in the same change that makes them; the release script refuses to run when it is empty.
+
+Do not re-run a release workflow that failed after publishing: GoReleaser would try to upload archives the release already has. Fix the cause and finish the remaining step by hand, or delete the release and tag and start again.

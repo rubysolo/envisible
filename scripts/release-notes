@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Print the release notes for one version: its section of CHANGELOG.md.
+#
+#   scripts/release-notes v0.0.8
+#
+# Used by the release workflow, so the GitHub release page says what the
+# changelog says instead of listing commit subjects. Exits non-zero if the
+# changelog has no section for that version, which stops a release whose
+# changelog was never written.
+set -euo pipefail
+
+[ $# -eq 1 ] || { echo "usage: scripts/release-notes vX.Y.Z" >&2; exit 2; }
+tag="$1"
+version="${tag#v}"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+changelog="$root/CHANGELOG.md"
+repo_url="https://github.com/rubysolo/envisible"
+
+# The section body: everything between this version's heading and the next.
+body="$(awk -v ver="$version" '
+  index($0, "## [" ver "]") == 1 { on = 1; next }
+  on && /^## \[/                 { exit }
+  on                             { print }
+' "$changelog")"
+
+# CHANGELOG.md is hard-wrapped, and GitHub renders a release body's single
+# newlines as line breaks. Join each wrapped paragraph or list item back into
+# one line. Fenced code blocks are left exactly as written.
+body="$(printf '%s\n' "$body" | awk '
+  function flush() { if (have) print buf; have = 0 }
+  /^[[:space:]]*```/ { flush(); print; fence = !fence; next }
+  fence              { print; next }
+  /^[[:space:]]*$/   { flush(); print; next }
+  have && /^[[:space:]]+[^[:space:]-]/ && buf !~ /^#/ {
+    sub(/^[[:space:]]+/, ""); buf = buf " " $0; next
+  }
+  { flush(); buf = $0; have = 1 }
+  END { flush() }
+')"
+
+# Trim leading and trailing blank lines.
+body="$(printf '%s\n' "$body" | sed -e '/./,$!d' | awk '{ lines[NR] = $0 } END { n = NR; while (n > 0 && lines[n] ~ /^[[:space:]]*$/) n--; for (i = 1; i <= n; i++) print lines[i] }')"
+
+if [ -z "$body" ]; then
+  echo "scripts/release-notes: CHANGELOG.md has no entries under \"## [$version]\"" >&2
+  exit 1
+fi
+
+printf '%s\n' "$body"
+
+# Link to the full changelog and, when there is an earlier tag, the comparison.
+prev="$(git -C "$root" describe --tags --abbrev=0 "$tag^" 2>/dev/null || true)"
+printf '\n**Full changelog:** [CHANGELOG.md](%s/blob/%s/CHANGELOG.md)' "$repo_url" "$tag"
+if [ -n "$prev" ]; then
+  printf ' · [%s...%s](%s/compare/%s...%s)' "$prev" "$tag" "$repo_url" "$prev" "$tag"
+fi
+printf '\n'

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Verify that HOMEBREW_TAP_GITHUB_TOKEN can update the Homebrew tap.
+#
+# GoReleaser publishes the GitHub release first and updates the tap last, so a
+# token that has expired fails the release after it is already public (this
+# happened to v0.0.8). Running this first turns that into a failure before
+# anything is published.
+#
+# Runs in CI, where the token is available as a secret. It checks that the
+# token is accepted, can see the tap, and can write to it. The write check
+# creates an unreferenced git blob, which changes nothing visible in the
+# repository and is garbage-collected by GitHub.
+#
+# The token is never printed.
+set -euo pipefail
+
+tap="${TAP_REPO:-rubysolo/homebrew-tools}"
+token="${HOMEBREW_TAP_GITHUB_TOKEN:-}"
+api="https://api.github.com"
+
+fail() { echo "✖ $*" >&2; exit 1; }
+
+[ -n "$token" ] || fail "HOMEBREW_TAP_GITHUB_TOKEN is empty or not set (is the repository secret defined?)"
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# request METHOD PATH [DATA] -> writes body to $tmp/body, headers to $tmp/headers, echoes the status code
+request() {
+  local method="$1" path="$2" data="${3:-}"
+  local args=(-sS -o "$tmp/body" -D "$tmp/headers" -w '%{http_code}' -X "$method"
+    -H "Authorization: Bearer $token"
+    -H "Accept: application/vnd.github+json"
+    -H "X-GitHub-Api-Version: 2022-11-28")
+  [ -n "$data" ] && args+=(-d "$data")
+  curl "${args[@]}" "$api$path"
+}
+
+code="$(request GET "/repos/$tap")"
+case "$code" in
+  200) ;;
+  401) fail "the token was rejected (401): it has expired or been revoked. Create a new one with write access to $tap and save it as the HOMEBREW_TAP_GITHUB_TOKEN secret." ;;
+  403) fail "the token is not allowed to read $tap (403)" ;;
+  404) fail "the token cannot see $tap (404): it has no access to that repository" ;;
+  *)   fail "unexpected response $code reading $tap" ;;
+esac
+echo "✔ token accepted, $tap is readable"
+
+code="$(request POST "/repos/$tap/git/blobs" '{"content":"envisible release preflight","encoding":"utf-8"}')"
+case "$code" in
+  201) echo "✔ token can write to $tap" ;;
+  403|404) fail "the token can read $tap but cannot write to it ($code): it needs Contents read and write access" ;;
+  *)   fail "unexpected response $code writing to $tap" ;;
+esac
+
+# Fine-grained and expiring classic tokens report their expiry in a header.
+expiry="$(grep -i '^github-authentication-token-expiration:' "$tmp/headers" | cut -d' ' -f2- | tr -d '\r' || true)"
+if [ -n "$expiry" ]; then
+  echo "ℹ token expires $expiry"
+  if exp_s="$(date -u -d "$expiry" +%s 2>/dev/null)"; then
+    days=$(( (exp_s - $(date -u +%s)) / 86400 ))
+    if [ "$days" -lt 14 ]; then
+      echo "::warning::HOMEBREW_TAP_GITHUB_TOKEN expires in $days day(s) ($expiry)"
+    fi
+  fi
+else
+  echo "ℹ token has no expiry"
+fi
