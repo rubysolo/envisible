@@ -97,7 +97,7 @@ forward-compatible behavior (`encoding/json` ignores unknowns) so it cannot chan
 accident.
 
 **Golden descriptor:** commit `pkg/kms/testdata/envisible.pub.v2.golden`, written by
-`v0.0.7`'s `kms.WritePublicKey` for a fixed RSA key, and assert it loads to exact
+`v0.0.5`'s `kms.WritePublicKey` (the first release with v2) for a fixed RSA key, and assert it loads to exact
 `Kind`/`Resource`/`Alg`/modulus. Same rule as plan 07: a failure means the format changed.
 
 ### Provider fakes record their requests
@@ -146,5 +146,5 @@ other's fake.
 
 - [ ] K1–K7 each fail at least one test when applied alone.
 - [ ] Rotate leaves every file and `envisible.pub` byte-identical on each failure case.
-- [ ] `pkg/kms/testdata/envisible.pub.v2.golden` exists, came from `v0.0.7`, and loads.
+- [ ] `pkg/kms/testdata/envisible.pub.v2.golden` exists, came from `v0.0.5`, and loads.
 - [ ] No provider test passes with an identifier blanked out of its request.
