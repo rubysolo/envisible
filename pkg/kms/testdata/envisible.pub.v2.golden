@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "provider": "gcp",
+  "resource": "projects/envisible-golden/locations/us/keyRings/golden/cryptoKeys/golden/cryptoKeyVersions/1",
+  "algorithm": "RSA-OAEP-SHA256-2048",
+  "public_key": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8TovmZuM1lgwL1LCDkvc\nopJCknsuJt400PtcKU98V+AMpdNwRAgjfoBTNhfAPh+kZGNfc1P7bqv8vxm1P04U\nU62uWFj49QBkmqS552D7WpF6VIT4Crrubxha8qzWynxdb3UVxt5uyG770VHabxYx\naUQm1eSlxHn6AebFFYnCsAz7jTJHSDG7MVnQ2ov3b9wkf2zDHR+eL8ewlr/MopTq\njxsxg7bwmgXSY7keehuKpC7p46G5HLICQ4qF2MFP91V4+Qz1fX13Miu47ar+6hnM\nyXSKnxDq5D47CTRH2T1VUBJvG3koWui/nDWpVmNYWUPgNEqYk8hGT5lA2kWYalu+\n0QIDAQAB\n-----END PUBLIC KEY-----\n"
+}

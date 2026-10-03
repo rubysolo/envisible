@@ -26,10 +26,16 @@ func swapKeyVaultClient(fn func(string, azcore.TokenCredential) (kvClient, error
 
 // fakeKVClient stands in for *azkeys.Client. Decrypt uses a local RSA key so
 // envelope round-trips can be exercised offline. The last name/version/algorithm
-// passed to Decrypt are recorded so tests can assert the SDK call shape.
+// passed to Decrypt, and the last name/version passed to GetKey, are recorded so
+// tests can assert the SDK call shape.
+//
+// GetKey with an empty version is how the real API spells "the latest version".
+// The fake serves a different key (latest) for it, so code that drops the pinned
+// version gets the wrong key back rather than one that happens to match.
 type fakeKVClient struct {
-	priv *rsa.PrivateKey
-	kty  azkeys.KeyType
+	priv   *rsa.PrivateKey
+	latest *rsa.PrivateKey
+	kty    azkeys.KeyType
 
 	getKeyErr  error
 	decryptErr error
@@ -38,15 +44,26 @@ type fakeKVClient struct {
 	lastVersion string
 	lastAlg     *azkeys.EncryptionAlgorithm
 	calls       int
+
+	lastGetKeyName    string
+	lastGetKeyVersion string
+	getKeyCalls       int
 }
 
 func (f *fakeKVClient) GetKey(_ context.Context, name, version string, _ *azkeys.GetKeyOptions) (azkeys.GetKeyResponse, error) {
+	f.getKeyCalls++
+	f.lastGetKeyName = name
+	f.lastGetKeyVersion = version
 	if f.getKeyErr != nil {
 		return azkeys.GetKeyResponse{}, f.getKeyErr
 	}
 	kty := f.kty
-	nBytes := f.priv.PublicKey.N.Bytes()
-	eBytes := big.NewInt(int64(f.priv.PublicKey.E)).Bytes()
+	pub := &f.priv.PublicKey
+	if version == "" && f.latest != nil {
+		pub = &f.latest.PublicKey
+	}
+	nBytes := pub.N.Bytes()
+	eBytes := big.NewInt(int64(pub.E)).Bytes()
 	return azkeys.GetKeyResponse{
 		KeyBundle: azkeys.KeyBundle{
 			Key: &azkeys.JSONWebKey{
@@ -79,7 +96,11 @@ func newFakeClient(t *testing.T) (*rsa.PrivateKey, *fakeKVClient) {
 	if err != nil {
 		t.Fatalf("rsa.GenerateKey: %v", err)
 	}
-	return priv, &fakeKVClient{priv: priv, kty: azkeys.KeyTypeRSA}
+	latest, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	return priv, &fakeKVClient{priv: priv, latest: latest, kty: azkeys.KeyTypeRSA}
 }
 
 func TestInitRegistersAzure(t *testing.T) {
@@ -136,6 +157,15 @@ func TestFetchPublicKeyHappyPath(t *testing.T) {
 	}
 	if info.Kind != kms.Azure || info.Resource != resource {
 		t.Errorf("info metadata mismatch: %+v", info)
+	}
+	// The descriptor pins a version. Fetching without it returns whatever is
+	// latest in the vault, and every value would then be wrapped for a key the
+	// pinned resource cannot unwrap.
+	if api.lastGetKeyName != "mykey" || api.lastGetKeyVersion != "v1" {
+		t.Errorf("GetKey name/version = %q/%q, want mykey/v1", api.lastGetKeyName, api.lastGetKeyVersion)
+	}
+	if info.PubKey.N.Cmp(api.latest.PublicKey.N) == 0 {
+		t.Fatalf("fetched the vault's latest key instead of pinned version v1")
 	}
 	if info.PubKey.N.Cmp(priv.PublicKey.N) != 0 || info.PubKey.E != priv.PublicKey.E {
 		t.Errorf("returned public key does not match fake's key")
@@ -272,8 +302,14 @@ func TestFetchPublicKeyThroughInjectedClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchPublicKey: %v", err)
 	}
+	if api.lastGetKeyName != "mykey" || api.lastGetKeyVersion != "v1" {
+		t.Errorf("GetKey name/version = %q/%q, want mykey/v1", api.lastGetKeyName, api.lastGetKeyVersion)
+	}
 	if info.PubKey.N.Cmp(priv.PublicKey.N) != 0 {
 		t.Error("returned public key does not match the fake's key")
+	}
+	if info.Resource != resource {
+		t.Errorf("info.Resource = %q, want %q", info.Resource, resource)
 	}
 }
 

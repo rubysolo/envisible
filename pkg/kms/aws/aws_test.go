@@ -32,9 +32,13 @@ type fakeKMSAPI struct {
 	lastKeyID     *string
 	lastEncAlg    types.EncryptionAlgorithmSpec
 	decryptCalled int
+
+	// lastGetPublicKeyInput is the most recent GetPublicKey request.
+	lastGetPublicKeyInput *awskms.GetPublicKeyInput
 }
 
-func (f *fakeKMSAPI) GetPublicKey(_ context.Context, _ *awskms.GetPublicKeyInput, _ ...func(*awskms.Options)) (*awskms.GetPublicKeyOutput, error) {
+func (f *fakeKMSAPI) GetPublicKey(_ context.Context, in *awskms.GetPublicKeyInput, _ ...func(*awskms.Options)) (*awskms.GetPublicKeyOutput, error) {
+	f.lastGetPublicKeyInput = in
 	if f.getPubKeyErr != nil {
 		return nil, f.getPubKeyErr
 	}
@@ -103,6 +107,9 @@ func TestFetchPublicKeyHappyPath(t *testing.T) {
 	}
 	if info.PubKey.N.Cmp(priv.PublicKey.N) != 0 {
 		t.Errorf("returned public key does not match fake's key")
+	}
+	if in := api.lastGetPublicKeyInput; in == nil || in.KeyId == nil || *in.KeyId != resource {
+		t.Errorf("GetPublicKey input = %+v, want KeyId %q", in, resource)
 	}
 }
 
@@ -246,6 +253,9 @@ func TestFetchPublicKeyThroughInjectedClient(t *testing.T) {
 	}
 	if info.PubKey.N.Cmp(priv.PublicKey.N) != 0 {
 		t.Error("returned public key does not match the fake's key")
+	}
+	if in := api.lastGetPublicKeyInput; in == nil || in.KeyId == nil || *in.KeyId != resource {
+		t.Errorf("GetPublicKey input = %+v, want KeyId %q", in, resource)
 	}
 }
 
