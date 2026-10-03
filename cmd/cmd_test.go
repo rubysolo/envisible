@@ -98,6 +98,8 @@ func TestResetRootRestoresEveryFlag(t *testing.T) {
 	if !verify || !setDryRun || !ui.Quiet || kmsRotateTo == "" {
 		t.Fatal("setting the flags did not reach the package-level variables they are bound to")
 	}
+	// Not flag-backed, so the walk cannot reach it: resetRoot clears it by hand.
+	privKeyMaterial = "left behind by an earlier command"
 
 	resetRoot(nil)
 
@@ -111,6 +113,9 @@ func TestResetRootRestoresEveryFlag(t *testing.T) {
 	})
 	if verify || setDryRun || ui.Quiet || kmsRotateTo != "" {
 		t.Errorf("flag-bound variables survived resetRoot: verify=%v setDryRun=%v ui.Quiet=%v kmsRotateTo=%q", verify, setDryRun, ui.Quiet, kmsRotateTo)
+	}
+	if privKeyMaterial != "" {
+		t.Errorf("privKeyMaterial survived resetRoot: %q", privKeyMaterial)
 	}
 }
 
