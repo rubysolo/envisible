@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -238,17 +240,25 @@ func TestDecryptErrors(t *testing.T) {
 	content := []byte("BAD=ENC[v1:not-base64-at-all]")
 	ctx := context.Background()
 
-	_, err := DecryptContent(ctx, content, NaclDecryptor{PrivateKey: priv}, false)
+	out, err := DecryptContent(ctx, content, NaclDecryptor{PrivateKey: priv}, false)
 	if err == nil {
 		t.Error("expected error for invalid base64")
+	}
+	// The marker that failed stays exactly as it was: never dropped, never
+	// replaced by an empty value.
+	if !bytes.Equal(out, content) {
+		t.Errorf("content changed on a failed decrypt.\ngot:  %q\nwant: %q", out, content)
 	}
 
 	// Wrong key
 	pub2, _, _ := crypto.GenerateKeypair()
 	encrypted, _ := EncryptContent([]byte("ENC[secret]"), NaclEncryptor{PublicKey: pub2})
-	_, err = DecryptContent(ctx, encrypted, NaclDecryptor{PrivateKey: priv}, false)
+	out, err = DecryptContent(ctx, encrypted, NaclDecryptor{PrivateKey: priv}, false)
 	if err == nil {
 		t.Error("expected error for decryption with wrong key")
+	}
+	if !bytes.Equal(out, encrypted) {
+		t.Errorf("content changed on a failed decrypt.\ngot:  %q\nwant: %q", out, encrypted)
 	}
 }
 
@@ -445,26 +455,41 @@ func TestStructureCheck(t *testing.T) {
 	_, enc, _ := newTestEnvelopeKeys(t)
 	v2Inner, _ := enc.EncryptValue([]byte("payload"))
 
+	// Truncations are valid base64 of a too-short blob, so they get past the
+	// decode and reach the length check they are named for.
+	b64 := func(n int) string { return base64.StdEncoding.EncodeToString(make([]byte, n)) }
+
+	// wantErr is a substring of the expected error; empty means no error.
 	cases := map[string]struct {
 		inner   string
 		size    int
-		wantErr bool
+		wantErr string
 	}{
-		"v1_ok":          {"v1:" + v1ct, 256, false},
-		"v2_ok":          {v2Inner, 256, false},
-		"unknown_prefix": {"v9:abcdef", 256, true},
-		"no_prefix":      {"raw-secret", 256, true},
-		"v1_truncated":   {"v1:" + v1ct[:8], 256, true},
-		"v2_truncated":   {v2Inner[:10] + "==", 256, true},
-		"v1_bad_base64":  {"v1:not-base64!!!", 256, true},
-		"v2_bad_base64":  {"v2:!!!not-base64", 256, true},
+		"v1_ok":          {"v1:" + v1ct, 256, ""},
+		"v2_ok":          {v2Inner, 256, ""},
+		"v1_minimum":     {"v1:" + b64(72), 256, ""},
+		"v2_minimum":     {"v2:" + b64(256+24+16), 256, ""},
+		"unknown_prefix": {"v9:abcdef", 256, "unknown marker version: v9:"},
+		"no_prefix":      {"raw-secret", 256, "not a versioned marker"},
+		"v1_truncated":   {"v1:" + v1ct[:8], 256, "v1: ciphertext truncated"},
+		"v1_one_short":   {"v1:" + b64(71), 256, "v1: ciphertext truncated"},
+		// 40 bytes is exactly nonce + tag: long enough only if the wrapped
+		// data key is left out of the minimum.
+		"v2_truncated":     {"v2:" + b64(40), 256, "v2: ciphertext truncated"},
+		"v2_one_short":     {"v2:" + b64(256+24+16-1), 256, "v2: ciphertext truncated"},
+		"v2_short_for_key": {v2Inner, 512, "v2: ciphertext truncated"},
+		"v1_bad_base64":    {"v1:not-base64!!!", 256, "v1: base64 decode"},
+		"v2_bad_base64":    {"v2:!!!not-base64", 256, "v2: base64 decode"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			err := StructureCheck(tc.inner, tc.size)
-			if tc.wantErr {
+			if tc.wantErr != "" {
 				if err == nil {
-					t.Errorf("expected error for %q", tc.inner)
+					t.Fatalf("expected error for %q", tc.inner)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error = %q, want it to contain %q", err, tc.wantErr)
 				}
 				return
 			}
@@ -966,5 +991,369 @@ func TestEvidenceRowBareMultiLineMarkerIsADefect(t *testing.T) {
 
 	if _, got, _ := EncryptContentWithDefects(content, NaclEncryptor{PublicKey: pub}); len(got) != 1 {
 		t.Errorf("encrypt must surface the defect, got %+v", got)
+	}
+}
+
+// --- decrypt-failure semantics (docs/plans/07) ---
+//
+// A marker that fails to decrypt is an error, never a value. Every case below
+// runs through CompositeDecryptor{NaclDecryptor, EnvelopeDecryptor}, the
+// composition cmd/keys.go builds for a project holding both key types, because
+// that is where a hard error can be mistaken for "not my version" and skipped.
+
+// decryptFailureFixture is a mixed-key project: one NaCl keypair, one RSA
+// envelope key, and the composite decryptor over both.
+type decryptFailureFixture struct {
+	naclEnc   NaclEncryptor
+	envEnc    *EnvelopeEncryptor
+	composite CompositeDecryptor
+	wrapped   int // size of a wrapped data key, in bytes
+}
+
+func newDecryptFailureFixture(t *testing.T) decryptFailureFixture {
+	t.Helper()
+	naclPub, naclPriv, err := crypto.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair: %v", err)
+	}
+	rsaPriv, envEnc, envDec := newTestEnvelopeKeys(t)
+	return decryptFailureFixture{
+		naclEnc: NaclEncryptor{PublicKey: naclPub},
+		envEnc:  envEnc,
+		composite: CompositeDecryptor{Decryptors: []Decryptor{
+			NaclDecryptor{PrivateKey: naclPriv}, envDec,
+		}},
+		wrapped: rsaPriv.Size(),
+	}
+}
+
+// flipInnerByte returns inner ("vN:" + base64) with one bit flipped at offset
+// in the decoded blob. A negative offset counts back from the end.
+func flipInnerByte(t *testing.T, inner string, offset int) string {
+	t.Helper()
+	blob, err := base64.StdEncoding.DecodeString(inner[3:])
+	if err != nil {
+		t.Fatalf("flipInnerByte: %v", err)
+	}
+	if offset < 0 {
+		offset += len(blob)
+	}
+	blob[offset] ^= 0x01
+	return inner[:3] + base64.StdEncoding.EncodeToString(blob)
+}
+
+// zeroInner is a version prefix followed by valid base64 of n zero bytes.
+func zeroInner(prefix string, n int) string {
+	return prefix + base64.StdEncoding.EncodeToString(make([]byte, n))
+}
+
+// assertDecryptFails checks the three things that make a failed decrypt safe:
+// DecryptMarker returns a hard error (not ErrSkip, which callers read as "leave
+// it alone and carry on"), DecryptContent returns an error too, and the content
+// it hands back still holds the failed marker byte-for-byte rather than an
+// empty value where the secret should be.
+func assertDecryptFails(t *testing.T, dec Decryptor, badInner, plaintext string) {
+	t.Helper()
+	ctx := context.Background()
+
+	pt, err := dec.DecryptMarker(ctx, badInner)
+	if err == nil {
+		t.Fatalf("DecryptMarker succeeded with %q; want an error", pt)
+	}
+	if errors.Is(err, ErrSkip) {
+		t.Errorf("DecryptMarker returned ErrSkip; a failed decrypt must be a hard error")
+	}
+	if pt != nil {
+		t.Errorf("DecryptMarker returned data alongside its error: %q", pt)
+	}
+	if strings.Contains(err.Error(), plaintext) {
+		t.Errorf("the error carries the plaintext: %v", err)
+	}
+
+	for _, keepMarkers := range []bool{false, true} {
+		content := []byte("BEFORE=1\nBAD=ENC[" + badInner + "]\nAFTER=2\n")
+		out, err := DecryptContent(ctx, content, dec, keepMarkers)
+		if err == nil {
+			t.Errorf("DecryptContent(keepMarkers=%v) reported success", keepMarkers)
+		}
+		if !bytes.Equal(out, content) {
+			t.Errorf("DecryptContent(keepMarkers=%v) rewrote a marker it could not decrypt.\ngot:  %q\nwant: %q",
+				keepMarkers, out, content)
+		}
+	}
+}
+
+func TestV1DecryptFailuresAreHardErrors(t *testing.T) {
+	const plaintext = "v1-plaintext-must-not-leak"
+	fx := newDecryptFailureFixture(t)
+
+	good, err := fx.naclEnc.EncryptValue([]byte(plaintext))
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+	otherPub, _, _ := crypto.GenerateKeypair()
+	foreign, err := NaclEncryptor{PublicKey: otherPub}.EncryptValue([]byte(plaintext))
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+
+	// Sanity: the untampered marker opens, so every failure below is down to
+	// the one thing that case changed.
+	if pt, err := fx.composite.DecryptMarker(context.Background(), good); err != nil || string(pt) != plaintext {
+		t.Fatalf("baseline decrypt = %q, %v", pt, err)
+	}
+
+	cases := map[string]string{
+		"wrong_key":               foreign,
+		"payload_byte_flipped":    flipInnerByte(t, good, -1),
+		"nonce_byte_flipped":      flipInnerByte(t, good, 32),
+		"ephemeral_key_flipped":   flipInnerByte(t, good, 0),
+		"truncated_three_bytes":   "v1:AAAA",
+		"truncated_inside_header": zeroInner("v1:", 40),
+		"truncated_one_short":     zeroInner("v1:", 71),
+		"truncated_real_marker":   good[:3+48],
+		"invalid_base64":          "v1:not-base64-at-all",
+		"empty_payload":           "v1:",
+		"doubled_version_prefix":  "v1:" + good,
+	}
+	for name, inner := range cases {
+		t.Run(name, func(t *testing.T) {
+			assertDecryptFails(t, fx.composite, inner, plaintext)
+		})
+	}
+}
+
+func TestV2DecryptFailuresAreHardErrors(t *testing.T) {
+	const plaintext = "v2-plaintext-must-not-leak"
+	fx := newDecryptFailureFixture(t)
+
+	good, err := fx.envEnc.EncryptValue([]byte(plaintext))
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+	// Sealed to a different RSA key: the unwrap itself fails.
+	_, otherEnc, _ := newTestEnvelopeKeys(t)
+	foreign, err := otherEnc.EncryptValue([]byte(plaintext))
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+
+	if pt, err := fx.composite.DecryptMarker(context.Background(), good); err != nil || string(pt) != plaintext {
+		t.Fatalf("baseline decrypt = %q, %v", pt, err)
+	}
+
+	cases := map[string]string{
+		"wrong_key": foreign,
+		// Past the wrapped key and the nonce: the unwrap succeeds, so only
+		// the secretbox tag stands between a corrupt payload and the caller.
+		"payload_first_byte_flipped": flipInnerByte(t, good, fx.wrapped+24),
+		"payload_last_byte_flipped":  flipInnerByte(t, good, -1),
+		"nonce_byte_flipped":         flipInnerByte(t, good, fx.wrapped),
+		"wrapped_key_byte_flipped":   flipInnerByte(t, good, 0),
+		"truncated_forty_bytes":      zeroInner("v2:", 40),
+		"truncated_one_short":        zeroInner("v2:", fx.wrapped+24+16-1),
+		"truncated_real_marker":      good[:3+64],
+		"invalid_base64":             "v2:!!!not-base64",
+		"empty_payload":              "v2:",
+	}
+	for name, inner := range cases {
+		t.Run(name, func(t *testing.T) {
+			assertDecryptFails(t, fx.composite, inner, plaintext)
+		})
+	}
+}
+
+// The composite may only fall through on ErrSkip. If it fell through on any
+// error, a wrong key in a project with both key types would be downgraded to a
+// skip: `decrypt` and `run` would hand the ciphertext downstream as the value
+// and exit 0.
+func TestCompositeReturnsHardErrorsInsteadOfSkipping(t *testing.T) {
+	fx := newDecryptFailureFixture(t)
+	ctx := context.Background()
+
+	otherPub, _, _ := crypto.GenerateKeypair()
+	foreign, err := NaclEncryptor{PublicKey: otherPub}.EncryptValue([]byte("sealed to someone else"))
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+
+	pt, err := fx.composite.DecryptMarker(ctx, foreign)
+	if err == nil {
+		t.Fatalf("a marker sealed to a different key decrypted to %q", pt)
+	}
+	if errors.Is(err, ErrSkip) {
+		t.Fatalf("wrong key was reported as ErrSkip")
+	}
+
+	// The member that owns the version decides; a later member is never asked.
+	// Order must not matter, and an unknown version is still a skip.
+	reversed := CompositeDecryptor{Decryptors: []Decryptor{fx.composite.Decryptors[1], fx.composite.Decryptors[0]}}
+	if _, err := reversed.DecryptMarker(ctx, foreign); err == nil || errors.Is(err, ErrSkip) {
+		t.Errorf("reversed composite: err = %v, want a hard error", err)
+	}
+	if _, err := fx.composite.DecryptMarker(ctx, "v9:AAAA"); !errors.Is(err, ErrSkip) {
+		t.Errorf("unknown version: err = %v, want ErrSkip", err)
+	}
+	stop := &recordingDecryptor{err: errors.New("hard failure")}
+	after := &recordingDecryptor{}
+	if _, err := (CompositeDecryptor{Decryptors: []Decryptor{stop, after}}).DecryptMarker(ctx, "v1:AAAA"); !errors.Is(err, stop.err) {
+		t.Errorf("err = %v, want the first member's error", err)
+	}
+	if after.calls != 0 {
+		t.Errorf("a decryptor after the one that failed was consulted %d times", after.calls)
+	}
+}
+
+// recordingDecryptor returns a fixed result and counts how often it is asked.
+type recordingDecryptor struct {
+	err   error
+	calls int
+}
+
+func (r *recordingDecryptor) DecryptMarker(context.Context, string) ([]byte, error) {
+	r.calls++
+	return nil, r.err
+}
+
+// A failed marker must not stop the healthy ones around it from decrypting,
+// and must itself survive verbatim: the error, not the output, is what tells
+// the caller the file is unusable.
+func TestDecryptContentKeepsFailedMarkerAmongGoodOnes(t *testing.T) {
+	fx := newDecryptFailureFixture(t)
+
+	goodV1, _ := fx.naclEnc.EncryptValue([]byte("one"))
+	goodV2, _ := fx.envEnc.EncryptValue([]byte("two"))
+	badV1 := flipInnerByte(t, goodV1, -1)
+	badV2 := flipInnerByte(t, goodV2, -1)
+
+	content := []byte("A=ENC[" + goodV1 + "]\nB=ENC[" + badV1 + "]\nC=ENC[" + goodV2 + "]\nD=ENC[" + badV2 + "]\nE=plain\n")
+	want := "A=one\nB=ENC[" + badV1 + "]\nC=two\nD=ENC[" + badV2 + "]\nE=plain\n"
+
+	out, err := DecryptContent(context.Background(), content, fx.composite, false)
+	if err == nil {
+		t.Fatalf("DecryptContent reported success with two corrupt markers")
+	}
+	if string(out) != want {
+		t.Errorf("output mismatch.\ngot:  %q\nwant: %q", out, want)
+	}
+}
+
+// Decrypt errors are printed, logged and pasted into bug reports. They must
+// describe the failure without quoting what was (or would have been) decrypted.
+func TestDecryptErrorsExcludePlaintext(t *testing.T) {
+	const plaintext = "hunter2-do-not-print"
+	ctx := context.Background()
+
+	pub, _, _ := crypto.GenerateKeypair()
+	_, wrongPriv, _ := crypto.GenerateKeypair()
+	v1Inner, _ := NaclEncryptor{PublicKey: pub}.EncryptValue([]byte(plaintext))
+
+	_, envEnc, _ := newTestEnvelopeKeys(t)
+	wrongRSA, _, wrongEnvDec := newTestEnvelopeKeys(t)
+	v2Inner, _ := envEnc.EncryptValue([]byte(plaintext))
+
+	wrong := CompositeDecryptor{Decryptors: []Decryptor{NaclDecryptor{PrivateKey: wrongPriv}, wrongEnvDec}}
+	// An unwrapper that "succeeds" with the wrong data key, which is what a
+	// misrouted KMS key looks like: the failure moves to the secretbox open.
+	wrongDK := CompositeDecryptor{Decryptors: []Decryptor{
+		NewEnvelopeDecryptor(fixedUnwrapper{dk: make([]byte, 32)}, wrongRSA.Size()),
+	}}
+
+	cases := map[string]struct {
+		dec   Decryptor
+		inner string
+	}{
+		"v1_wrong_key":       {wrong, v1Inner},
+		"v2_wrong_unwrapper": {wrong, v2Inner},
+		"v2_wrong_data_key":  {wrongDK, v2Inner},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			content := []byte("SECRET=ENC[" + tc.inner + "]\n")
+			out, err := DecryptContent(ctx, content, tc.dec, false)
+			if err == nil {
+				t.Fatalf("expected an error; got output %q", out)
+			}
+			if strings.Contains(err.Error(), plaintext) {
+				t.Errorf("error text contains the plaintext: %v", err)
+			}
+			if bytes.Contains(out, []byte(plaintext)) {
+				t.Errorf("output contains the plaintext: %q", out)
+			}
+			if !bytes.Equal(out, content) {
+				t.Errorf("the failed marker was rewritten: %q", out)
+			}
+		})
+	}
+}
+
+// fixedUnwrapper hands back the same data key whatever it is given.
+type fixedUnwrapper struct{ dk []byte }
+
+func (f fixedUnwrapper) Unwrap(context.Context, []byte) ([]byte, error) { return f.dk, nil }
+
+// --- encrypt-side failure (docs/plans/07) ---
+
+// failingEncryptor encrypts like NaclEncryptor except for the values listed in
+// fail, for which it returns err — a KMS Wrap error, say.
+type failingEncryptor struct {
+	NaclEncryptor
+	fail map[string]bool
+	err  error
+}
+
+func (f failingEncryptor) EncryptValue(plaintext []byte) (string, error) {
+	if f.fail[string(plaintext)] {
+		return "", f.err
+	}
+	return f.NaclEncryptor.EncryptValue(plaintext)
+}
+
+// A failed encrypt leaves that marker in the clear. EncryptContent has to
+// return the error, wherever in the file the failure happened, because the
+// error is the only thing that stops `encrypt` and `edit` writing the result.
+func TestEncryptContentReturnsEncryptorError(t *testing.T) {
+	pub, _, _ := crypto.GenerateKeypair()
+	wrapErr := errors.New("kms: wrap failed")
+	content := []byte("A=ENC[first]\nB=ENC[second]\nC=ENC[third]\n")
+
+	for _, failing := range [][]string{
+		{"first"}, {"second"}, {"third"}, {"first", "third"}, {"first", "second", "third"},
+	} {
+		t.Run(strings.Join(failing, "+"), func(t *testing.T) {
+			enc := failingEncryptor{NaclEncryptor: NaclEncryptor{PublicKey: pub}, fail: map[string]bool{}, err: wrapErr}
+			for _, v := range failing {
+				enc.fail[v] = true
+			}
+
+			out, err := EncryptContent(content, enc)
+			if !errors.Is(err, wrapErr) {
+				t.Fatalf("err = %v, want the encryptor's error", err)
+			}
+			if _, _, err := EncryptContentWithDefects(content, enc); !errors.Is(err, wrapErr) {
+				t.Errorf("EncryptContentWithDefects: err = %v, want the encryptor's error", err)
+			}
+
+			// What comes back with the error is not a finished file: each
+			// failed marker is still there, verbatim and in the clear, never
+			// dropped or emptied. That is exactly why the error must not be
+			// lost.
+			markers, defects := Scan(out)
+			if len(defects) != 0 || len(markers) != 3 {
+				t.Fatalf("output no longer holds three markers: %+v %+v\n%s", markers, defects, out)
+			}
+			for i, value := range []string{"first", "second", "third"} {
+				if enc.fail[value] {
+					if markers[i].Encrypted || markers[i].Value != value {
+						t.Errorf("failed marker %q came back as %+v", value, markers[i])
+					}
+				} else if !markers[i].Encrypted {
+					t.Errorf("marker %q should have been encrypted; got %+v", value, markers[i])
+				}
+			}
+			if !bytes.HasPrefix(out, []byte("A=ENC[")) || bytes.Count(out, []byte("\n")) != 3 {
+				t.Errorf("surrounding content was disturbed: %s", out)
+			}
+		})
 	}
 }
