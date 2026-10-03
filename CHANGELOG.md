@@ -73,6 +73,13 @@ decrypts with every later one.
   Previously only the first was forwarded and later ones were swallowed, so a command that
   did not exit on the first signal could only be stopped with `SIGKILL`. A signal arriving
   while the command was starting could also be lost.
+- `keygen` writes both key files or neither. Previously it wrote `envisible.pub` first, so a
+  failed private-key write (an unwritable `--key` path, a failed `--print-key` write to
+  stdout) left a new public key with no matching private key. Run over an existing pair,
+  that replaced the public key and kept the old private key, so values encrypted afterwards
+  could not be decrypted.
+- `keygen` always creates the private key file with mode `0600`, including when it replaces
+  an existing key file that had looser permissions.
 - `kms rotate` rejects a `v2` value that is too short to decrypt, and aborts. Previously a
   value truncated inside its nonce or payload was re-wrapped and counted as rotated.
 
