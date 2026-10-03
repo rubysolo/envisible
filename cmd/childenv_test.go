@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -273,5 +274,38 @@ func TestPassKeyIsARunFlagOnly(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "unknown flag: --pass-key") {
 			t.Errorf("envisible %s: err = %v, want unknown flag", strings.Join(args, " "), err)
 		}
+	}
+}
+
+// TestChildEnvironMatchesTheNameTheWayTheOSDoes: os.Getenv resolves names
+// case-insensitively on Windows and exactly everywhere else, so that is how the
+// key is recognized. On Unix `envisible_key` is a different variable, not the
+// key, and is passed through; on Windows it is the key and is dropped.
+func TestChildEnvironMatchesTheNameTheWayTheOSDoes(t *testing.T) {
+	for name, want := range map[string]bool{
+		"ENVISIBLE_KEY": true,
+		"envisible_key": runtime.GOOS == "windows",
+		"Envisible_Key": runtime.GOOS == "windows",
+	} {
+		if got := isPrivateKeyEnvVar(name); got != want {
+			t.Errorf("isPrivateKeyEnvVar(%q) = %v, want %v on %s", name, got, want, runtime.GOOS)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return // the environment itself is case-insensitive; one variable, one name
+	}
+	t.Setenv("ENVISIBLE_KEY", "the-key")
+	t.Setenv("envisible_key", "a-different-variable")
+	var kept bool
+	for _, kv := range childEnviron() {
+		if kv == "envisible_key=a-different-variable" {
+			kept = true
+		}
+		if strings.HasPrefix(kv, "ENVISIBLE_KEY=") {
+			t.Errorf("ENVISIBLE_KEY reached the child environment")
+		}
+	}
+	if !kept {
+		t.Error("envisible_key is not the key on this OS and must be passed through")
 	}
 }
