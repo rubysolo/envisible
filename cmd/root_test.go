@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
 	envcrypto "github.com/rubysolo/envisible/pkg/crypto"
+	"github.com/rubysolo/envisible/pkg/ui"
 )
 
 // TestMain clears the key-locating environment variables before any test runs.
@@ -15,11 +18,81 @@ import (
 // (which outranks envisible.key) or ENVISIBLE_KEY_PATH would silently swap in a
 // different key and fail them for reasons that have nothing to do with the code.
 // Tests that exercise these variables set them with t.Setenv.
+//
+// With runAsCLIEnv set the test binary is not running tests at all: it is a
+// child re-executed by runCLISubprocess, standing in for the envisible binary.
 func TestMain(m *testing.M) {
+	if os.Getenv(runAsCLIEnv) == "1" {
+		// main() in miniature. Arguments are taken raw, before the testing
+		// package would try to parse them as its own flags.
+		rootCmd.SetArgs(os.Args[1:])
+		if err := Execute(); err != nil {
+			ui.Error("%v", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	for _, name := range []string{"ENVISIBLE_KEY", "ENVISIBLE_KEY_PATH", "ENVISIBLE_PUB_PATH", "ENVISIBLE_FILE"} {
 		os.Unsetenv(name)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	// The CLI binary the pre-commit hook tests build, if any of them ran.
+	if cliBinDir != "" {
+		os.RemoveAll(cliBinDir)
+	}
+	os.Exit(code)
+}
+
+// runAsCLIEnv switches the test binary into behaving as the envisible CLI; see
+// TestMain.
+const runAsCLIEnv = "ENVISIBLE_TEST_RUN_AS_CLI"
+
+// runCLISubprocess runs `envisible args...` as a real child process, in the
+// current directory, and returns its exit code and stdout. It exists for the
+// paths that end in os.Exit, which cannot run inside the test process.
+func runCLISubprocess(t *testing.T, args ...string) (exitCode int, stdout string) {
+	t.Helper()
+	child := exec.Command(os.Args[0], args...)
+	child.Env = append(os.Environ(), runAsCLIEnv+"=1")
+	var out, errOut bytes.Buffer
+	child.Stdout, child.Stderr = &out, &errOut
+	err := child.Run()
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+		return 0, out.String()
+	case errors.As(err, &exitErr):
+		t.Logf("child stderr: %s", errOut.String())
+		return exitErr.ExitCode(), out.String()
+	default:
+		t.Fatalf("re-executing the test binary as envisible: %v", err)
+		return 0, ""
+	}
+}
+
+// TestRunPropagatesTheChildExitCode: `run` is a wrapper, so a caller (a
+// Procfile, CI, `set -e`) must see the wrapped command's own status. run.go
+// does that with os.Exit, hence the subprocess. 3 is neither success nor the 1
+// that main() exits with for an ordinary error.
+func TestRunPropagatesTheChildExitCode(t *testing.T) {
+	setupRunFixture(t)
+
+	code, stdout := runCLISubprocess(t, "-q", "run", "--", "sh", "-c", `printf '%s' "$MY_VAR"; exit 3`)
+	if code != 3 {
+		t.Errorf("exit code = %d, want the child's 3", code)
+	}
+	if stdout != "secret-value" {
+		t.Errorf("child stdout = %q, want the decrypted value: the child may not have run", stdout)
+	}
+
+	// The controls: a child that succeeds exits 0, and envisible's own failure
+	// (no such env file) is main()'s 1, not a child status.
+	if code, _ := runCLISubprocess(t, "-q", "run", "--", "sh", "-c", "exit 0"); code != 0 {
+		t.Errorf("exit code = %d for a child that succeeded, want 0", code)
+	}
+	if code, _ := runCLISubprocess(t, "-q", "-f", "missing.env", "run", "--", "sh", "-c", "exit 3"); code != 1 {
+		t.Errorf("exit code = %d when the env file is missing, want 1", code)
+	}
 }
 
 // envKeyFixture is a temp working dir holding envisible.pub and a .env whose one

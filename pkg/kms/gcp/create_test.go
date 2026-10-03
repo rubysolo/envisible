@@ -162,7 +162,7 @@ func TestCreateKeyPollsWhilePending(t *testing.T) {
 
 func TestCreateKeyRejectsMissingFlags(t *testing.T) {
 	_, err := createKeyWithClient(context.Background(), &fakeCreatorClient{}, CreateKeyParams{Project: "p"})
-	if err == nil || !strings.Contains(err.Error(), "required") {
+	if err == nil || !strings.Contains(err.Error(), "--project, --location, --keyring, --name are all required") {
 		t.Errorf("expected required-fields error, got %v", err)
 	}
 }

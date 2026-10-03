@@ -266,7 +266,7 @@ func TestNewCredential(t *testing.T) {
 
 func TestNewUnwrapperRejectsBadResource(t *testing.T) {
 	_, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{Resource: "not-a-url"})
-	if err == nil || !strings.Contains(err.Error(), "azure") {
+	if err == nil || !strings.Contains(err.Error(), `resource must be an https URL, got "not-a-url"`) {
 		t.Errorf("expected resource parse error, got %v", err)
 	}
 }

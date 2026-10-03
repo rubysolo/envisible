@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,41 +14,146 @@ import (
 	"github.com/rubysolo/envisible/pkg/crypto"
 	kmspkg "github.com/rubysolo/envisible/pkg/kms"
 	"github.com/rubysolo/envisible/pkg/ui"
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
+// resetRoot points the root command's stdout at out and restores every flag to
+// its default. It deliberately leaves stderr alone: cobra's stderr falls back to
+// os.Stderr, the same place ui.* writes, so a test can never mistake one stream
+// for the other. Use runRoot (or captureStdStreams) to read stderr.
 func resetRoot(out io.Writer) {
 	if out == nil {
 		out = io.Discard
 	}
 	rootCmd.SetOut(out)
-	rootCmd.SetErr(out)
+	rootCmd.SetErr(nil)
 	rootCmd.SetArgs(nil)
-	// Reset persistent flags to defaults
-	privKeyPath = "envisible.key"
-	pubKeyPath = "envisible.pub"
-	filePath = ".env"
-	ui.Quiet = false
-	// Reset the "changed" state of persistent flags
-	rootCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
+	// Every flag on every command goes back to its default, so a flag added
+	// later is covered without anyone remembering to list it here. All of them
+	// are scalar today; a slice-valued flag would need its own reset, since Set
+	// appends (TestResetRootRestoresEveryFlag fails if one appears).
+	visitEveryFlag(rootCmd, func(_ *cobra.Command, f *pflag.Flag) {
+		_ = f.Value.Set(f.DefValue)
 		f.Changed = false
 	})
-	// Also reset the subcommand flags if they were changed
-	inplace = false
-	stripMarkers = false
-	textconv = false
-	printKey = false
-	// Normally recomputed by PersistentPreRunE, but tests that call
-	// loadDecryptor directly would otherwise see whatever the last command left.
+	// Not flag-backed. Normally recomputed by PersistentPreRunE, but tests that
+	// call loadDecryptor directly would otherwise see whatever the last command
+	// left.
 	privKeyMaterial = ""
-	// kms init / create flag vars persist across cobra Execute calls because
-	// they're package-level — reset them so subsequent tests start clean.
-	kmsInitProvider, kmsInitResource = "", ""
-	kmsCreateProvider, kmsCreateName = "", ""
-	gcpCreateProject, gcpCreateLocation, gcpCreateKeyring = "", "", ""
-	awsCreateRegion, awsCreateAlias = "", ""
-	azCreateVault = ""
-	kmsRotateTo = ""
+}
+
+// visitEveryFlag calls fn for every local and persistent flag of c and of each
+// command below it. A persistent flag is visited once per command that has
+// merged it in; fn must tolerate that.
+func visitEveryFlag(c *cobra.Command, fn func(*cobra.Command, *pflag.Flag)) {
+	for _, fs := range []*pflag.FlagSet{c.Flags(), c.PersistentFlags()} {
+		fs.VisitAll(func(f *pflag.Flag) { fn(c, f) })
+	}
+	for _, sub := range c.Commands() {
+		visitEveryFlag(sub, fn)
+	}
+}
+
+// TestResetRootRestoresEveryFlag guards resetRoot itself. Cobra keeps a flag's
+// value on the command object between Execute calls, so a flag resetRoot misses
+// leaks into whichever test runs next: `check --verify` used to turn every
+// later `check` in the process into a verifying one.
+func TestResetRootRestoresEveryFlag(t *testing.T) {
+	t.Cleanup(func() { resetRoot(nil) })
+
+	// The lazily added --help flags exist only once a command has executed.
+	visitEveryFlag(rootCmd, func(c *cobra.Command, _ *pflag.Flag) { c.InitDefaultHelpFlag() })
+
+	seen := map[string]bool{}
+	visitEveryFlag(rootCmd, func(c *cobra.Command, f *pflag.Flag) {
+		var nonDefault string
+		switch f.Value.Type() {
+		case "bool":
+			nonDefault = "true"
+		case "string":
+			nonDefault = "not-the-default"
+		default:
+			// A slice flag's Set appends, so resetRoot's Set(DefValue) would not
+			// restore it. Teach both resetRoot and this test about the new type.
+			t.Fatalf("%s --%s has type %s, which resetRoot does not know how to reset", c.CommandPath(), f.Name, f.Value.Type())
+		}
+		if err := f.Value.Set(nonDefault); err != nil {
+			t.Fatalf("set %s --%s: %v", c.CommandPath(), f.Name, err)
+		}
+		f.Changed = true
+		seen[c.CommandPath()+" --"+f.Name] = true
+	})
+	// Spot-check that the walk reached persistent, subcommand and nested
+	// subcommand flags, so an empty walk cannot pass for a clean one.
+	for _, want := range []string{
+		"envisible --key", "envisible --quiet", "envisible check --verify",
+		"envisible decrypt --textconv", "envisible keygen --print-key",
+		"envisible set --dry-run", "envisible kms rotate --to", "envisible kms create --vault",
+	} {
+		if !seen[want] {
+			t.Errorf("the walk never visited %s", want)
+		}
+	}
+	if !verify || !setDryRun || !ui.Quiet || kmsRotateTo == "" {
+		t.Fatal("setting the flags did not reach the package-level variables they are bound to")
+	}
+	// Not flag-backed, so the walk cannot reach it: resetRoot clears it by hand.
+	privKeyMaterial = "left behind by an earlier command"
+
+	resetRoot(nil)
+
+	visitEveryFlag(rootCmd, func(c *cobra.Command, f *pflag.Flag) {
+		if got := f.Value.String(); got != f.DefValue {
+			t.Errorf("%s --%s = %q after resetRoot, want its default %q", c.CommandPath(), f.Name, got, f.DefValue)
+		}
+		if f.Changed {
+			t.Errorf("%s --%s is still marked Changed after resetRoot", c.CommandPath(), f.Name)
+		}
+	})
+	if verify || setDryRun || ui.Quiet || kmsRotateTo != "" {
+		t.Errorf("flag-bound variables survived resetRoot: verify=%v setDryRun=%v ui.Quiet=%v kmsRotateTo=%q", verify, setDryRun, ui.Quiet, kmsRotateTo)
+	}
+	if privKeyMaterial != "" {
+		t.Errorf("privKeyMaterial survived resetRoot: %q", privKeyMaterial)
+	}
+}
+
+// runRoot executes args against a freshly reset rootCmd and returns what the
+// command wrote to its stdout and stderr writers separately.
+func runRoot(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	var out bytes.Buffer
+	resetRoot(&out)
+	return executeRoot(t, &out, args...)
+}
+
+// mustRun executes args against a freshly reset rootCmd and fails the test on error.
+// For setup steps, whose failure would otherwise surface as a misleading later one.
+func mustRun(t *testing.T, args ...string) {
+	t.Helper()
+	if _, _, err := runRoot(t, args...); err != nil {
+		t.Fatalf("setup `envisible %s`: %v", strings.Join(args, " "), err)
+	}
+}
+
+// runRootWithStdin is runRoot for the commands that read "-".
+func runRootWithStdin(t *testing.T, stdin string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	var out bytes.Buffer
+	resetRootWithStdin(t, &out, stdin)
+	return executeRoot(t, &out, args...)
+}
+
+// executeRoot runs args on an already reset rootCmd whose stdout is out. ui.*
+// and cobra's stderr both write to os.Stderr rather than to a cobra writer, so
+// the process streams are swapped for pipes while the command runs. Anything
+// that bypasses cobra and prints straight to os.Stdout still counts as stdout.
+func executeRoot(t *testing.T, out *bytes.Buffer, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	rootCmd.SetArgs(args)
+	rawStdout, stderr := captureStdStreams(t, func() { err = rootCmd.Execute() })
+	return out.String() + rawStdout, stderr, err
 }
 
 func TestRootHelp(t *testing.T) {
@@ -73,9 +177,7 @@ func TestKeygen(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	b := bytes.NewBufferString("")
 	resetRoot(b)
@@ -99,9 +201,7 @@ func contains(s, substr string) bool {
 
 func TestEncryptDecryptV2Workflow(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// Generate a local RSA key and swap GCP's registry entries to use it.
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -159,9 +259,7 @@ func TestEncryptDecryptWorkflow(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// 1. Keygen
 	resetRoot(nil)
@@ -206,9 +304,7 @@ func TestCheck(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	confFile := "config.yaml"
 
@@ -216,8 +312,8 @@ func TestCheck(t *testing.T) {
 	os.WriteFile(confFile, []byte("password: ENC[hello]"), 0644)
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"check", confFile})
-	if err := rootCmd.Execute(); err == nil {
-		t.Error("expected error for unencrypted value")
+	if err := rootCmd.Execute(); err == nil || !contains(err.Error(), "found 1 unencrypted values in config.yaml") {
+		t.Errorf("expected the unencrypted value to be reported, got %v", err)
 	}
 
 	// Case 2: Has a v1: prefix but is structurally too short to be a real ciphertext.
@@ -225,8 +321,8 @@ func TestCheck(t *testing.T) {
 	os.WriteFile(confFile, []byte("password: ENC[v1:fake]"), 0644)
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"check", confFile})
-	if err := rootCmd.Execute(); err == nil {
-		t.Errorf("expected check to flag truncated v1: marker as malformed")
+	if err := rootCmd.Execute(); err == nil || !contains(err.Error(), "found 1 malformed markers in config.yaml") {
+		t.Errorf("expected check to flag truncated v1: marker as malformed, got %v", err)
 	}
 
 	// Case 3: A real encrypted value — must pass the default structure check.
@@ -255,22 +351,16 @@ func TestRun(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// 1. Keygen
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"keygen"})
-	rootCmd.Execute()
+	mustRun(t, "keygen")
 
 	// 2. Create .env
 	os.WriteFile(".env", []byte("MY_VAR=ENC[secret-value]"), 0644)
 
 	// 3. Encrypt .env
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"encrypt", "-i", ".env"})
-	rootCmd.Execute()
+	mustRun(t, "encrypt", "-i", ".env")
 
 	// 4. Run 'env' and check for MY_VAR
 	// Note: We use 'env' command as it's common on unix.
@@ -279,8 +369,7 @@ func TestRun(t *testing.T) {
 	// We need to pass -- because cobra might try to parse child flags
 	rootCmd.SetArgs([]string{"run", "--", "env"})
 	if err := rootCmd.Execute(); err != nil {
-		t.Logf("run failed (maybe env command not found?): %v", err)
-		return
+		t.Fatalf("run failed: %v", err)
 	}
 
 	if !contains(b.String(), "MY_VAR=secret-value") {
@@ -297,13 +386,9 @@ func TestRunChildFlagsWithoutDashDash(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"keygen"})
-	rootCmd.Execute()
+	mustRun(t, "keygen")
 
 	b := bytes.NewBufferString("")
 	resetRoot(b)
@@ -317,21 +402,9 @@ func TestRunChildFlagsWithoutDashDash(t *testing.T) {
 }
 
 func TestGitIntegration(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "envisible-git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
-
-	// Mock a git repo (properly)
-	if err := exec.Command("git", "init").Run(); err != nil {
-		t.Skip("git not found, skipping git integration test")
-		return
-	}
+	// Skips, visibly, only when git is not installed; a failing `git init` is a
+	// failure.
+	initGitRepo(t)
 
 	// Test git setup
 	resetRoot(nil)
@@ -359,23 +432,17 @@ func TestEdit(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// 1. Keygen
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"keygen"})
-	rootCmd.Execute()
+	mustRun(t, "keygen")
 
 	// 2. Create file
 	confFile := "config.yaml"
 	os.WriteFile(confFile, []byte("password: ENC[old]"), 0644)
 
 	// 3. Encrypt it first
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"encrypt", "-i", confFile})
-	rootCmd.Execute()
+	mustRun(t, "encrypt", "-i", confFile)
 
 	// 4. Edit it using a mock editor
 	// Our mock editor will just append " - edited" to the file.
@@ -398,7 +465,9 @@ func TestEdit(t *testing.T) {
 	b := bytes.NewBufferString("")
 	resetRoot(b)
 	rootCmd.SetArgs([]string{"decrypt", confFile})
-	rootCmd.Execute()
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("decrypt failed: %v", err)
+	}
 
 	if !contains(b.String(), "password: ENC[new]") {
 		t.Errorf("edit did not update content correctly: %s", b.String())
@@ -412,9 +481,7 @@ func TestDecryptTextconv(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	confFile := "config.yaml"
 	content := "secret: ENC[v1:something]"
@@ -434,12 +501,10 @@ func TestDecryptTextconv(t *testing.T) {
 }
 
 // setupRunFixture builds a tmp dir with keys and an encrypted .env containing
-// MY_VAR=ENC[secret-value]. Returns the dir and a cleanup func.
-func setupRunFixture(t *testing.T) func() {
+// MY_VAR=ENC[secret-value], and chdirs into it for the rest of the test.
+func setupRunFixture(t *testing.T) {
 	t.Helper()
-	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
+	t.Chdir(t.TempDir())
 
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"keygen"})
@@ -452,7 +517,6 @@ func setupRunFixture(t *testing.T) func() {
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	return func() { os.Chdir(oldWd) }
 }
 
 // captureStdStreams swaps os.Stdout / os.Stderr for pipes, runs fn, and returns
@@ -477,7 +541,7 @@ func captureStdStreams(t *testing.T, fn func()) (stdout, stderr string) {
 }
 
 func TestBannerGoesToStderrNotStdout(t *testing.T) {
-	defer setupRunFixture(t)()
+	setupRunFixture(t)
 
 	b := bytes.NewBufferString("")
 	resetRoot(b)
@@ -488,8 +552,7 @@ func TestBannerGoesToStderrNotStdout(t *testing.T) {
 		runErr = rootCmd.Execute()
 	})
 	if runErr != nil {
-		t.Logf("run failed (maybe env missing?): %v", runErr)
-		return
+		t.Fatalf("run failed: %v", runErr)
 	}
 
 	if contains(stdout, "Loading environment") || contains(stdout, "Starting:") {
@@ -501,7 +564,7 @@ func TestBannerGoesToStderrNotStdout(t *testing.T) {
 }
 
 func TestQuietFlagSuppressesBanner(t *testing.T) {
-	defer setupRunFixture(t)()
+	setupRunFixture(t)
 
 	b := bytes.NewBufferString("")
 	resetRoot(b)
@@ -512,8 +575,7 @@ func TestQuietFlagSuppressesBanner(t *testing.T) {
 		runErr = rootCmd.Execute()
 	})
 	if runErr != nil {
-		t.Logf("run failed (maybe env missing?): %v", runErr)
-		return
+		t.Fatalf("run failed: %v", runErr)
 	}
 
 	if contains(stderr, "Loading environment") || contains(stderr, "Starting:") {
@@ -531,14 +593,10 @@ func TestPartialEncryptionWorkflow(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// 1. Keygen
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"keygen"})
-	rootCmd.Execute()
+	mustRun(t, "keygen")
 
 	// 2. Create a partially encrypted file
 	// We'll use a fake v1: marker for VAR1, and plain for VAR2.
@@ -573,7 +631,9 @@ func TestPartialEncryptionWorkflow(t *testing.T) {
 	b := bytes.NewBufferString("")
 	resetRoot(b)
 	rootCmd.SetArgs([]string{"decrypt", "mixed.env"})
-	rootCmd.Execute()
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("decrypt failed: %v", err)
+	}
 
 	if !contains(b.String(), "VAR1=ENC[val1]") || !contains(b.String(), "VAR2=ENC[val2]") {
 		t.Errorf("decryption failed to recover both values correctly. Got: %q", b.String())
@@ -587,39 +647,26 @@ func TestEnvisibleFileEnvVar(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// 1. Keygen
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"keygen"})
-	rootCmd.Execute()
+	mustRun(t, "keygen")
 
 	// 2. Create custom env file (not .env)
 	customEnvFile := "custom.env"
 	os.WriteFile(customEnvFile, []byte("CUSTOM_VAR=ENC[custom-secret]"), 0644)
 
 	// 3. Encrypt the custom file
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"encrypt", "-i", customEnvFile})
-	rootCmd.Execute()
+	mustRun(t, "encrypt", "-i", customEnvFile)
 
 	// 4. Set ENVISIBLE_FILE env var and run without specifying file
 	t.Setenv("ENVISIBLE_FILE", customEnvFile)
 
-	// Re-initialize filePath from env var (simulating fresh start)
-	filePath = os.Getenv("ENVISIBLE_FILE")
-
 	b := bytes.NewBufferString("")
 	resetRoot(b)
-	// Note: resetRoot sets filePath back to .env, so we need to set it again
-	filePath = customEnvFile
-
 	rootCmd.SetArgs([]string{"run", "--", "env"})
 	if err := rootCmd.Execute(); err != nil {
-		t.Logf("run failed: %v", err)
-		return
+		t.Fatalf("run failed: %v", err)
 	}
 
 	if !contains(b.String(), "CUSTOM_VAR=custom-secret") {
@@ -634,14 +681,10 @@ func TestFilePathFlagOverridesEnvVar(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// 1. Keygen
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"keygen"})
-	rootCmd.Execute()
+	mustRun(t, "keygen")
 
 	// 2. Create two env files with different content
 	envFromEnvVar := "from-envvar.env"
@@ -650,13 +693,9 @@ func TestFilePathFlagOverridesEnvVar(t *testing.T) {
 	os.WriteFile(envFromFlag, []byte("SOURCE=ENC[flag]"), 0644)
 
 	// 3. Encrypt both files
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"encrypt", "-i", envFromEnvVar})
-	rootCmd.Execute()
+	mustRun(t, "encrypt", "-i", envFromEnvVar)
 
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"encrypt", "-i", envFromFlag})
-	rootCmd.Execute()
+	mustRun(t, "encrypt", "-i", envFromFlag)
 
 	// 4. Set ENVISIBLE_FILE to one file, but use -f flag for the other
 	t.Setenv("ENVISIBLE_FILE", envFromEnvVar)
@@ -666,8 +705,7 @@ func TestFilePathFlagOverridesEnvVar(t *testing.T) {
 	// Use the -f flag to override the env var
 	rootCmd.SetArgs([]string{"-f", envFromFlag, "run", "--", "env"})
 	if err := rootCmd.Execute(); err != nil {
-		t.Logf("run failed: %v", err)
-		return
+		t.Fatalf("run failed: %v", err)
 	}
 
 	// Flag should win over env var
@@ -686,22 +724,16 @@ func TestDefaultFileUsedWhenNoArgProvided(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// 1. Keygen
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"keygen"})
-	rootCmd.Execute()
+	mustRun(t, "keygen")
 
 	// 2. Create and encrypt custom.env
 	customFile := "custom.env"
 	os.WriteFile(customFile, []byte("VALUE=ENC[test-value]"), 0644)
 
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"encrypt", "-i", customFile})
-	rootCmd.Execute()
+	mustRun(t, "encrypt", "-i", customFile)
 
 	// 3. Test encrypt command uses global filePath when no arg provided
 	// First encrypt the custom file with -f flag, no positional arg
@@ -745,33 +777,26 @@ func TestMissingFileErrorsWhenExplicitlySet(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// 1. Keygen
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"keygen"})
-	rootCmd.Execute()
+	mustRun(t, "keygen")
 
 	// 2. Test that missing file via -f flag produces an error for run
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"-f", "nonexistent.env", "run", "--", "echo", "hello"})
 	err = rootCmd.Execute()
-	if err == nil {
-		t.Error("expected error when file specified via -f flag doesn't exist")
+	if err == nil || !contains(err.Error(), "failed to read env file") || !contains(err.Error(), "nonexistent.env") {
+		t.Errorf("expected a read error naming the file given via -f, got %v", err)
 	}
 
 	// 3. Test that missing file via ENVISIBLE_FILE env var produces an error
 	t.Setenv("ENVISIBLE_FILE", "also-nonexistent.env")
-	filePath = "also-nonexistent.env" // Simulate what init() would do
-
 	resetRoot(nil)
-	filePath = "also-nonexistent.env" // resetRoot resets it, set again
 	rootCmd.SetArgs([]string{"run", "--", "echo", "hello"})
 	err = rootCmd.Execute()
-	if err == nil {
-		t.Error("expected error when file specified via ENVISIBLE_FILE env var doesn't exist")
+	if err == nil || !contains(err.Error(), "failed to read env file") || !contains(err.Error(), "also-nonexistent.env") {
+		t.Errorf("expected a read error naming the file given via ENVISIBLE_FILE, got %v", err)
 	}
 }
 
@@ -782,17 +807,13 @@ func TestMissingDefaultFileAllowedForRun(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// Clear ENVISIBLE_FILE to ensure we're using the default
 	t.Setenv("ENVISIBLE_FILE", "")
 
 	// 1. Keygen
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"keygen"})
-	rootCmd.Execute()
+	mustRun(t, "keygen")
 
 	// 2. Run without any .env file - should succeed (no env vars loaded)
 	b := bytes.NewBufferString("")
@@ -811,14 +832,10 @@ func TestPositionalArgOverridesGlobalFlag(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// 1. Keygen
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"keygen"})
-	rootCmd.Execute()
+	mustRun(t, "keygen")
 
 	// 2. Create two files
 	fileFromFlag := "from-flag.yaml"
@@ -827,13 +844,9 @@ func TestPositionalArgOverridesGlobalFlag(t *testing.T) {
 	os.WriteFile(fileFromArg, []byte("ARG_VAL=ENC[arg-value]"), 0644)
 
 	// 3. Encrypt both
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"encrypt", "-i", fileFromFlag})
-	rootCmd.Execute()
+	mustRun(t, "encrypt", "-i", fileFromFlag)
 
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"encrypt", "-i", fileFromArg})
-	rootCmd.Execute()
+	mustRun(t, "encrypt", "-i", fileFromArg)
 
 	// 4. Use -f for one file but provide positional arg for another
 	// Positional arg should win for commands that accept it
@@ -860,14 +873,10 @@ func TestAllCommandsUseGlobalFilePath(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// 1. Keygen
-	resetRoot(nil)
-	rootCmd.SetArgs([]string{"keygen"})
-	rootCmd.Execute()
+	mustRun(t, "keygen")
 
 	// 2. Create and prepare a test file
 	testFile := "test-config.yaml"
@@ -909,8 +918,7 @@ func TestAllCommandsUseGlobalFilePath(t *testing.T) {
 	resetRoot(b)
 	rootCmd.SetArgs([]string{"-f", testFile, "run", "--", "env"})
 	if err := rootCmd.Execute(); err != nil {
-		t.Logf("run with -f failed (maybe env command not found?): %v", err)
-		return
+		t.Fatalf("run with -f failed: %v", err)
 	}
 
 	if !contains(b.String(), "SECRET=my-secret") {
@@ -922,9 +930,7 @@ func TestAllCommandsUseGlobalFilePath(t *testing.T) {
 func setupKeyedTempDir(t *testing.T) {
 	t.Helper()
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	t.Cleanup(func() { os.Chdir(oldWd) })
+	t.Chdir(tmpDir)
 
 	resetRoot(nil)
 	rootCmd.SetArgs([]string{"keygen"})
@@ -938,14 +944,18 @@ func setupKeyedTempDir(t *testing.T) {
 func TestCheckFailsOnEvidenceTableRows(t *testing.T) {
 	setupKeyedTempDir(t)
 
-	rows := map[string]string{
-		"truncated_by_trailing_bracket": "password: ENC[ab]cd]\n",
-		"bracketed_structure":           `sa: ENC[{"scopes":["a","b"]}]` + "\n",
-		"multi_line_value":              "key: ENC[-----BEGIN KEY-----\nMIIEv\n-----END KEY-----]\n",
-		"unterminated_marker":           "key: ENC[oops-no-close\n",
+	// The first two are whole markers nobody encrypted; the last two never
+	// close on their line and are reported as defects.
+	const unencrypted, malformed = "found 1 unencrypted values in ", "found 1 malformed ENC[ marker(s)"
+	rows := map[string]struct{ content, wantErr string }{
+		"truncated_by_trailing_bracket": {"password: ENC[ab]cd]\n", unencrypted},
+		"bracketed_structure":           {`sa: ENC[{"scopes":["a","b"]}]` + "\n", unencrypted},
+		"multi_line_value":              {"key: ENC[-----BEGIN KEY-----\nMIIEv\n-----END KEY-----]\n", malformed},
+		"unterminated_marker":           {"key: ENC[oops-no-close\n", malformed},
 	}
 
-	for name, content := range rows {
+	for name, row := range rows {
+		content := row.content
 		t.Run(name, func(t *testing.T) {
 			confFile := name + ".yaml"
 			if err := os.WriteFile(confFile, []byte(content), 0644); err != nil {
@@ -953,8 +963,12 @@ func TestCheckFailsOnEvidenceTableRows(t *testing.T) {
 			}
 			resetRoot(nil)
 			rootCmd.SetArgs([]string{"check", confFile})
-			if err := rootCmd.Execute(); err == nil {
-				t.Errorf("check passed on %q — it must not", content)
+			err := rootCmd.Execute()
+			if err == nil {
+				t.Fatalf("check passed on %q — it must not", content)
+			}
+			if !contains(err.Error(), row.wantErr) {
+				t.Errorf("check on %q failed with %q, want it to say %q", content, err, row.wantErr)
 			}
 		})
 	}
@@ -1198,8 +1212,8 @@ func TestCheckFailsWhenACommentBracketPrecedesACleartextSecret(t *testing.T) {
 			}
 			resetRoot(nil)
 			rootCmd.SetArgs([]string{"check", confFile})
-			if err := rootCmd.Execute(); err == nil {
-				t.Errorf("check passed on a cleartext secret in %q", content)
+			if err := rootCmd.Execute(); err == nil || !contains(err.Error(), "found 1 unencrypted values in "+confFile) {
+				t.Errorf("check should report the cleartext secret in %q, got %v", content, err)
 			}
 
 			resetRoot(nil)
