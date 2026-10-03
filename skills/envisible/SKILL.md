@@ -243,7 +243,8 @@ Envisible writes decrypted content to stdout and all informational banners (`ℹ
 
 ### Dockerfile
 Don't bake `envisible.key` into the image layers. Either:
-- Mount it at runtime (Compose / Kubernetes secret / ECS task secret).
+- Inject it at runtime as `ENVISIBLE_KEY` from the platform's secret store (Kubernetes secret → env, ECS task secret, Compose `environment:`), so no key file exists in the container.
+- Or mount it as a file at runtime (Compose / Kubernetes secret volume). Use this on binaries older than `ENVISIBLE_KEY` support.
 - For KMS mode, give the container an IAM role / workload identity — no key file needed.
 
 ---
@@ -273,15 +274,25 @@ After this, `git diff` shows decrypted changes locally (only for people with the
 In CI, the agent typically needs to **decrypt at runtime** (for tests / deploys) but not encrypt. Two patterns:
 
 ### Local-keypair CI
-Store `envisible.key` as a CI secret. Example for GitHub Actions:
+Store the contents of `envisible.key` (the single base64 line `keygen` writes) as a CI secret, and hand it to envisible as the `ENVISIBLE_KEY` env var. The key goes straight from the secret store into the process and never touches the runner's disk. Example for GitHub Actions:
 ```yaml
-- name: Restore envisible key
-  run: echo "${{ secrets.ENVISIBLE_KEY }}" > envisible.key && chmod 600 envisible.key
 - name: Run tests
+  env:
+    ENVISIBLE_KEY: ${{ secrets.ENVISIBLE_KEY }}
   run: envisible run -e .env.test -- npm test
 ```
 
-Set the secret to the base64-encoded contents or the raw key — match what your runner can store. Avoid printing the key.
+Scope `ENVISIBLE_KEY` to the steps that decrypt, not the whole job. Don't `echo` it. envisible never includes the value in errors, but a shell `set -x` will print it.
+
+`ENVISIBLE_KEY` holds the key itself. `ENVISIBLE_KEY_PATH` holds a *path* to a key file. Don't mix them up. An explicitly passed `--key` overrides both.
+
+**Older binaries:** `ENVISIBLE_KEY` is newer than v0.0.7. Check whether the installed binary supports it with `envisible keygen --help | grep -q -- --print-key` (both arrived in the same change). If it doesn't, write the key to a file instead:
+```yaml
+- name: Restore envisible key
+  run: |
+    umask 077
+    printf '%s\n' "${{ secrets.ENVISIBLE_KEY }}" > envisible.key
+```
 
 ### KMS CI
 Authenticate the runner to the cloud (workload identity federation for GitHub Actions → GCP/AWS, OIDC, etc.), then `envisible run` just works:
@@ -352,6 +363,8 @@ Add a short section to the project README (or a `SECRETS.md`) covering:
 | Install (Go) | `go install github.com/rubysolo/envisible@latest` |
 | Install (Homebrew) | `brew tap rubysolo/tools && brew install envisible` |
 | Generate local keypair | `envisible keygen` |
+| Generate keypair, private key to stdout only (no `envisible.key`) | `envisible keygen --print-key \| <secret-store-put>` |
+| Decrypt with key supplied by value | `ENVISIBLE_KEY=<base64> envisible run -e <envfile> -- <cmd>` |
 | Init from existing KMS key | `envisible kms init --provider {gcp,aws,azure} --resource <ref>` |
 | Provision KMS key | `envisible kms create --provider gcp --project P --location L --keyring R --name K` |
 | Encrypt in place | `envisible encrypt -i <file>` |
