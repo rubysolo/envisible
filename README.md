@@ -207,7 +207,13 @@ A CI runner that exports the same variable globally for the whole job gets the w
 
 **Envisible does not pass the key on.** `ENVISIBLE_KEY` is removed from the environment of every process envisible starts: the command under `run`, `$EDITOR` under `edit`, and `git`. In the example above, `npm start` receives the decrypted values and not the key that decrypts them, so a compromised dependency can read the secrets it was given but cannot decrypt the rest of the repository. Two consequences:
 
-- A child that itself calls `envisible` (a script under `run` that decrypts a second file) no longer inherits the key. Decrypt both files in the outer command, or provision the key to the inner call explicitly.
+- A child that itself calls `envisible` (a script under `run` that decrypts a second file) does not inherit the key. Opt in for that one command with `--pass-key`:
+
+  ```bash
+  envisible run --pass-key -- ./scripts/deploy.sh
+  ```
+
+  The flag goes before the command, like `-f` and `-k`; anything after the command is the command's own argument. It leaves an inherited `ENVISIBLE_KEY` in place and does nothing else: a key read from `envisible.key` is not copied into the environment. It exists only on `run`; an editor and git never need the key.
 - Only the inherited variable is dropped. An env file that defines its own `ENVISIBLE_KEY=...` entry is passed to the child like any other entry.
 
 `ENVISIBLE_KEY_PATH`, `ENVISIBLE_PUB_PATH` and `ENVISIBLE_FILE` are paths, not secrets, and are inherited as usual.
