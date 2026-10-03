@@ -29,5 +29,10 @@ jobs:
         run: |
           for i in 1 2 3; do go mod download && break || sleep $((i * 10)); done
 
+      # -shuffle=on randomizes test order within each package, so state leaked
+      # from one test into another fails here rather than only when someone
+      # reorders a file; the seed is printed, and `-shuffle=<seed>` replays it.
+      # -race catches unsynchronized access (the cmd tests swap os.Stdout and
+      # start child processes).
       - name: Run tests
-        run: go test -v ./...
+        run: go test -v -race -shuffle=on ./...

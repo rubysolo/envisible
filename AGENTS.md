@@ -23,6 +23,7 @@ Guidance for AI coding agents (Claude Code, Cursor, Codex, Aider, Zed, etc.) wor
 ```bash
 go build ./...          # build everything
 go test ./...           # run the full test suite
+go test -race -shuffle=on ./...   # what CI runs: race detector, random test order
 go vet ./...            # static checks
 go run . <subcommand>   # run the CLI locally, e.g. `go run . keygen`
 ```
@@ -37,6 +38,7 @@ There is no separate lint config beyond `go vet`; keep code `gofmt`-clean.
 - **Never commit secrets.** `envisible.key`, `*.key`, `*.pem`, and `*.env` are gitignored. The only exceptions are the fixed, test-only exemplar keys under `pkg/processor/testdata/`. `envisible.pub` is safe to commit. The repo's own pre-commit hook (`envisible git install-hook`) runs `envisible check`.
 - Match the surrounding Cobra command style when adding subcommands; register them in `cmd/root.go`.
 - Add or update tests next to the code you change (`*_test.go`); the KMS providers have per-provider test files.
+- **Documented commands are tested.** `TestDocumentedCommandsExist` (`cmd/docs_test.go`) resolves every `envisible ...` command in `README.md`, `AGENTS.md` and `skills/envisible/SKILL.md` against the real command tree. Removing or renaming a command or flag fails that test until the docs are updated; `CHANGELOG.md` is exempt because it describes old releases.
 
 ## Releasing
 
