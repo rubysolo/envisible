@@ -14,6 +14,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// passKey is the --pass-key flag: hand the child the inherited ENVISIBLE_KEY
+// instead of removing it. Off by default, because the child is given the
+// decrypted values and has no use for the key unless it runs envisible itself.
+var passKey bool
+
 var runCmd = &cobra.Command{
 	Use:   "run [command]",
 	Short: "Run a command with decrypted environment variables",
@@ -26,7 +31,14 @@ through untouched:
   envisible run -f prod.env -- printenv DATABASE_URL
 
 envisible's own flags (-f, -k) must come before the command; a '--'
-separator is accepted but not required.`,
+separator is accepted but not required.
+
+The command receives the decrypted values but not the private key: an
+inherited ENVISIBLE_KEY is removed from its environment. Pass --pass-key
+when the command itself needs to decrypt (a script that calls envisible
+again):
+
+  envisible run --pass-key -- ./scripts/deploy.sh`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// The child process inherits stdin; consuming it to read the env file
@@ -62,10 +74,15 @@ separator is accepted but not required.`,
 
 		// Prepare command
 		childCmd := exec.Command(args[0], args[1:]...)
-		// The child gets the decrypted values, never the key that decrypts them.
-		// A file that itself defines ENVISIBLE_KEY is honored: extraEnv is
+		// The child gets the decrypted values, never the key that decrypts them,
+		// unless --pass-key asks for the inherited environment untouched. A file
+		// that itself defines ENVISIBLE_KEY is honored either way: extraEnv is
 		// appended after the inherited one has been dropped.
-		childCmd.Env = childEnviron()
+		if passKey {
+			childCmd.Env = os.Environ()
+		} else {
+			childCmd.Env = childEnviron()
+		}
 		for k, v := range extraEnv {
 			childCmd.Env = append(childCmd.Env, fmt.Sprintf("%s=%s", k, v))
 		}
@@ -100,5 +117,6 @@ func init() {
 	// Stop flag parsing at the first positional so the child command's flags
 	// (e.g. `ruby -e ...`) are never mistaken for envisible flags.
 	runCmd.Flags().SetInterspersed(false)
+	runCmd.Flags().BoolVar(&passKey, "pass-key", false, "leave an inherited ENVISIBLE_KEY in the command's environment (default: removed)")
 	rootCmd.AddCommand(runCmd)
 }
