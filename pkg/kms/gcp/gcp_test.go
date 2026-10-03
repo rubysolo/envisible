@@ -22,7 +22,8 @@ import (
 // fakeKMSClient stands in for *cloudkms.KeyManagementClient. AsymmetricDecrypt
 // uses a local RSA private key so envelope round-trips can be exercised without
 // real GCP credentials. CRC32C fields are populated to match what the live API
-// would return — flip the crcSkew bit to simulate corruption.
+// would return — flip the crcSkew bit to simulate corruption. The Name of every
+// request is recorded so tests can assert which key version was asked for.
 type fakeKMSClient struct {
 	priv      *rsa.PrivateKey
 	algorithm kmspb.CryptoKeyVersion_CryptoKeyVersionAlgorithm
@@ -32,10 +33,14 @@ type fakeKMSClient struct {
 	getPubKeyErr        error
 	asymmetricErr       error
 
+	lastGetPublicKeyName string
+	lastDecryptName      string
+
 	closeCalled bool
 }
 
-func (f *fakeKMSClient) GetPublicKey(_ context.Context, _ *kmspb.GetPublicKeyRequest, _ ...gax.CallOption) (*kmspb.PublicKey, error) {
+func (f *fakeKMSClient) GetPublicKey(_ context.Context, req *kmspb.GetPublicKeyRequest, _ ...gax.CallOption) (*kmspb.PublicKey, error) {
+	f.lastGetPublicKeyName = req.GetName()
 	if f.getPubKeyErr != nil {
 		return nil, f.getPubKeyErr
 	}
@@ -56,6 +61,7 @@ func (f *fakeKMSClient) GetPublicKey(_ context.Context, _ *kmspb.GetPublicKeyReq
 }
 
 func (f *fakeKMSClient) AsymmetricDecrypt(_ context.Context, req *kmspb.AsymmetricDecryptRequest, _ ...gax.CallOption) (*kmspb.AsymmetricDecryptResponse, error) {
+	f.lastDecryptName = req.GetName()
 	if f.asymmetricErr != nil {
 		return nil, f.asymmetricErr
 	}
@@ -108,15 +114,28 @@ func swapKMSClient(fn func(context.Context) (kmsClient, error)) func() {
 }
 
 func TestNewUnwrapperThroughInjectedClient(t *testing.T) {
-	_, client := newFakeClient(t)
+	priv, client := newFakeClient(t)
 	t.Cleanup(swapKMSClient(func(context.Context) (kmsClient, error) { return client, nil }))
 
-	u, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{Resource: "projects/p/.../cryptoKeyVersions/1"})
+	resource := "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
+	u, err := newUnwrapper(context.Background(), &kms.PublicKeyInfo{Resource: resource})
 	if err != nil {
 		t.Fatalf("newUnwrapper: %v", err)
 	}
 	if u == nil {
 		t.Fatal("newUnwrapper returned a nil unwrapper")
+	}
+
+	// The descriptor's resource must be what the unwrapper decrypts against.
+	wrapped, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, &priv.PublicKey, make([]byte, 32), nil)
+	if err != nil {
+		t.Fatalf("EncryptOAEP: %v", err)
+	}
+	if _, err := u.Unwrap(context.Background(), wrapped); err != nil {
+		t.Fatalf("Unwrap: %v", err)
+	}
+	if client.lastDecryptName != resource {
+		t.Errorf("AsymmetricDecrypt Name = %q, want %q", client.lastDecryptName, resource)
 	}
 }
 
@@ -133,12 +152,19 @@ func TestFetchPublicKeyThroughInjectedClient(t *testing.T) {
 	priv, client := newFakeClient(t)
 	t.Cleanup(swapKMSClient(func(context.Context) (kmsClient, error) { return client, nil }))
 
-	info, err := fetchPublicKey(context.Background(), "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1")
+	resource := "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
+	info, err := fetchPublicKey(context.Background(), resource)
 	if err != nil {
 		t.Fatalf("fetchPublicKey: %v", err)
 	}
 	if info.PubKey.N.Cmp(priv.PublicKey.N) != 0 {
 		t.Error("returned public key does not match the fake's key")
+	}
+	if client.lastGetPublicKeyName != resource {
+		t.Errorf("GetPublicKey Name = %q, want %q", client.lastGetPublicKeyName, resource)
+	}
+	if info.Resource != resource {
+		t.Errorf("info.Resource = %q, want %q", info.Resource, resource)
 	}
 }
 
@@ -153,13 +179,20 @@ func TestFetchPublicKeyClientError(t *testing.T) {
 
 func TestFetchPublicKeyHappyPath(t *testing.T) {
 	priv, client := newFakeClient(t)
+	resource := "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
 
-	info, err := fetchPublicKeyWithClient(context.Background(), client, "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1")
+	info, err := fetchPublicKeyWithClient(context.Background(), client, resource)
 	if err != nil {
 		t.Fatalf("fetchPublicKeyWithClient: %v", err)
 	}
+	if client.lastGetPublicKeyName != resource {
+		t.Errorf("GetPublicKey Name = %q, want %q", client.lastGetPublicKeyName, resource)
+	}
 	if info.Kind != kms.GCP {
 		t.Errorf("info.Kind = %v, want %v", info.Kind, kms.GCP)
+	}
+	if info.Resource != resource {
+		t.Errorf("info.Resource = %q, want %q", info.Resource, resource)
 	}
 	if info.Alg != kms.RSAOAEPSHA256_2048 {
 		t.Errorf("info.Alg = %v, want %v", info.Alg, kms.RSAOAEPSHA256_2048)
@@ -207,7 +240,8 @@ func TestFetchPublicKeyPropagatesAPIError(t *testing.T) {
 
 func TestUnwrapperRoundTrip(t *testing.T) {
 	priv, client := newFakeClient(t)
-	u := newUnwrapperWithClient(client, "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1")
+	resource := "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
+	u := newUnwrapperWithClient(client, resource)
 
 	dk := make([]byte, 32)
 	if _, err := rand.Read(dk); err != nil {
@@ -224,6 +258,12 @@ func TestUnwrapperRoundTrip(t *testing.T) {
 	}
 	if string(got) != string(dk) {
 		t.Errorf("Unwrap returned wrong plaintext")
+	}
+
+	// GCP ciphertext does not identify its key: Name alone selects the key
+	// version that decrypts, so it must be the pinned resource.
+	if client.lastDecryptName != resource {
+		t.Errorf("AsymmetricDecrypt Name = %q, want %q", client.lastDecryptName, resource)
 	}
 }
 

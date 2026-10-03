@@ -18,6 +18,7 @@ type fakeCreatorClient struct {
 	getVersionResponse *kmspb.CryptoKeyVersion
 	getVersionErr      error
 	getVersionCalls    int
+	getVersionNames    []string // Name of each poll request, in order
 }
 
 func (f *fakeCreatorClient) CreateCryptoKey(_ context.Context, req *kmspb.CreateCryptoKeyRequest, _ ...gax.CallOption) (*kmspb.CryptoKey, error) {
@@ -28,8 +29,9 @@ func (f *fakeCreatorClient) CreateCryptoKey(_ context.Context, req *kmspb.Create
 	return f.createResp, nil
 }
 
-func (f *fakeCreatorClient) GetCryptoKeyVersion(_ context.Context, _ *kmspb.GetCryptoKeyVersionRequest, _ ...gax.CallOption) (*kmspb.CryptoKeyVersion, error) {
+func (f *fakeCreatorClient) GetCryptoKeyVersion(_ context.Context, req *kmspb.GetCryptoKeyVersionRequest, _ ...gax.CallOption) (*kmspb.CryptoKeyVersion, error) {
 	f.getVersionCalls++
+	f.getVersionNames = append(f.getVersionNames, req.GetName())
 	if f.getVersionErr != nil {
 		return nil, f.getVersionErr
 	}
@@ -55,6 +57,12 @@ func TestCreateKeyThroughInjectedClient(t *testing.T) {
 	}
 	if got != versionName {
 		t.Errorf("CreateKey returned %q, want %q", got, versionName)
+	}
+	if got, want := fake.createReq.GetParent(), "projects/p/locations/us/keyRings/r"; got != want {
+		t.Errorf("CreateCryptoKey Parent = %q, want %q", got, want)
+	}
+	if got := fake.createReq.GetCryptoKeyId(); got != "mykey" {
+		t.Errorf("CreateCryptoKey CryptoKeyId = %q, want %q", got, "mykey")
 	}
 }
 
@@ -90,6 +98,13 @@ func TestCreateKeyHappyPath(t *testing.T) {
 	}
 	if got != versionName {
 		t.Errorf("got resource %q, want %q", got, versionName)
+	}
+	// Every param is distinct, so a field mapped to the wrong param shows up.
+	if got, want := client.createReq.GetParent(), "projects/p/locations/us/keyRings/r"; got != want {
+		t.Errorf("CreateCryptoKey Parent = %q, want %q", got, want)
+	}
+	if got := client.createReq.GetCryptoKeyId(); got != "mykey" {
+		t.Errorf("CreateCryptoKey CryptoKeyId = %q, want %q", got, "mykey")
 	}
 	if client.createReq.GetCryptoKey().GetPurpose() != kmspb.CryptoKey_ASYMMETRIC_DECRYPT {
 		t.Errorf("purpose = %v, want ASYMMETRIC_DECRYPT", client.createReq.GetCryptoKey().GetPurpose())
@@ -133,6 +148,15 @@ func TestCreateKeyPollsWhilePending(t *testing.T) {
 	}
 	if client.getVersionCalls == 0 {
 		t.Errorf("expected at least one poll, got zero")
+	}
+	// The poll must ask about the version CreateCryptoKey just returned.
+	for i, name := range client.getVersionNames {
+		if name != versionName {
+			t.Errorf("poll %d: GetCryptoKeyVersion Name = %q, want %q", i, name, versionName)
+		}
+	}
+	if got := client.createReq.GetCryptoKeyId(); got != "k" {
+		t.Errorf("CreateCryptoKey CryptoKeyId = %q, want %q", got, "k")
 	}
 }
 

@@ -2,15 +2,21 @@ package kms
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -166,14 +172,122 @@ func TestWriteLoadPublicKeyV2RoundTrip(t *testing.T) {
 	}
 }
 
-func TestLoadPublicKeyRejectsBadInputs(t *testing.T) {
+// validDescriptor returns the fields of a v2 envisible.pub that loads cleanly.
+// The descriptor tests change one field at a time, so each case can only fail
+// at the check for the field it changed.
+func validDescriptor(t *testing.T) map[string]any {
+	t.Helper()
+	priv := generateRSAKey(t, 2048)
+	return map[string]any{
+		"version":    2,
+		"provider":   "gcp",
+		"resource":   "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1",
+		"algorithm":  string(RSAOAEPSHA256_2048),
+		"public_key": pkixPEM(t, &priv.PublicKey),
+	}
+}
+
+// pkixPEM encodes any public key the way WritePublicKey encodes an RSA one.
+func pkixPEM(t *testing.T, pub any) string {
+	t.Helper()
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatalf("MarshalPKIXPublicKey: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+}
+
+func writeDescriptor(t *testing.T, fields map[string]any) string {
+	t.Helper()
+	body, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal descriptor: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "envisible.pub")
+	if err := os.WriteFile(path, body, 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	return path
+}
+
+func TestLoadPublicKeyValidDescriptorLoads(t *testing.T) {
+	// The base every rejection case below is derived from must itself load,
+	// or those cases would prove nothing about the field they change.
+	fields := validDescriptor(t)
+	info, key, err := LoadPublicKey(writeDescriptor(t, fields))
+	if err != nil {
+		t.Fatalf("LoadPublicKey: %v", err)
+	}
+	if key != nil || info == nil {
+		t.Fatalf("valid v2 descriptor loaded as info=%v key=%v", info, key)
+	}
+	if info.Kind != GCP || info.Resource != fields["resource"] || info.Alg != RSAOAEPSHA256_2048 {
+		t.Errorf("metadata mismatch: %+v", info)
+	}
+}
+
+func TestLoadPublicKeyRejectsInvalidDescriptorField(t *testing.T) {
+	ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa.GenerateKey: %v", err)
+	}
+
+	cases := map[string]struct {
+		field string
+		value any
+		want  string // substring the error must carry, naming the bad field
+	}{
+		"future_version":    {"version", 3, "version"},
+		"zero_version":      {"version", 0, "version"},
+		"unknown_provider":  {"provider", "icloud", "provider"},
+		"empty_provider":    {"provider", "", "provider"},
+		"empty_resource":    {"resource", "", "resource"},
+		"blank_resource":    {"resource", "  ", "resource"},
+		"unknown_algorithm": {"algorithm", "RSA-OAEP-SHA1", "algorithm"},
+		"empty_algorithm":   {"algorithm", "", "algorithm"},
+		"rsa_1024_key":      {"public_key", pkixPEM(t, &generateRSAKey(t, 1024).PublicKey), "1024-bit"},
+		"ec_key":            {"public_key", pkixPEM(t, &ecPriv.PublicKey), "not RSA"},
+		"not_a_pem_block":   {"public_key", "not-a-pem-block", "PEM"},
+		"empty_public_key":  {"public_key", "", "PEM"},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			fields := validDescriptor(t)
+			fields[tc.field] = tc.value
+
+			info, key, err := LoadPublicKey(writeDescriptor(t, fields))
+			if err == nil {
+				t.Fatalf("descriptor with %s=%v loaded: info=%+v key=%v", tc.field, tc.value, info, key)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadPublicKeyIgnoresUnknownDescriptorField(t *testing.T) {
+	// encoding/json drops fields it does not know, so a descriptor written by
+	// a newer envisible that adds one still loads here. Pinned so that cannot
+	// change by accident (e.g. by switching to DisallowUnknownFields).
+	fields := validDescriptor(t)
+	fields["key_origin"] = "hsm"
+
+	info, _, err := LoadPublicKey(writeDescriptor(t, fields))
+	if err != nil {
+		t.Fatalf("descriptor with an unknown field was rejected: %v", err)
+	}
+	if info == nil || info.Resource != fields["resource"] {
+		t.Errorf("descriptor with an unknown field loaded wrong: %+v", info)
+	}
+}
+
+func TestLoadPublicKeyRejectsUnparseableFiles(t *testing.T) {
 	dir := t.TempDir()
 
 	cases := map[string]string{
-		"unknown_provider": `{"version": 2, "provider": "icloud", "resource": "x", "algorithm": "RSA-OAEP-SHA256-2048", "public_key": ""}`,
-		"missing_resource": `{"version": 2, "provider": "gcp", "resource": "", "algorithm": "RSA-OAEP-SHA256-2048", "public_key": ""}`,
-		"wrong_version":    `{"version": 9, "provider": "gcp", "resource": "x", "algorithm": "RSA-OAEP-SHA256-2048", "public_key": ""}`,
-		"bad_pem":          `{"version": 2, "provider": "gcp", "resource": "x", "algorithm": "RSA-OAEP-SHA256-2048", "public_key": "not-a-pem-block"}`,
+		"malformed_json":   `{"version": 2, "provider": "gcp"`,
 		"truncated_base64": "this is not valid base64 of 32 bytes",
 		"empty_file":       "",
 	}
@@ -188,6 +302,54 @@ func TestLoadPublicKeyRejectsBadInputs(t *testing.T) {
 				t.Errorf("expected error for %s", name)
 			}
 		})
+	}
+}
+
+// goldenDescriptorModulus is the modulus of the key in
+// testdata/envisible.pub.v2.golden, as printed by the generator.
+const goldenDescriptorModulus = "f13a2f999b8cd658302f52c20e4bdca29242927b2e26de34d0fb5c294f7c57e0" +
+	"0ca5d3704408237e80533617c03e1fa464635f7353fb6eabfcbf19b53f4e1453" +
+	"adae5858f8f500649aa4b9e760fb5a917a5484f80abaee6f185af2acd6ca7c5d" +
+	"6f7515c6de6ec86efbd151da6f1631694426d5e4a5c479fa01e6c51589c2b00c" +
+	"fb8d32474831bb3159d0da8bf76fdc247f6cc31d1f9e2fc7b096bfcca294ea8f" +
+	"1b3183b6f09a05d263b91e7a1b8aa42ee9e3a1b91cb202438a85d8c14ff75578" +
+	"f90cf57d7d77322bb8edaafeea19ccc9748a9f10eae43e3b093447d93d555012" +
+	"6f1b79285ae8bf9c35a95663585943e0344a9893c8464f9940da45986a5bbed1"
+
+// TestLoadPublicKeyGoldenV2Descriptor loads an envisible.pub written by
+// v0.0.5's WritePublicKey, the first release with the v2 format. Projects have
+// files like it committed, so a failure here means the descriptor format
+// changed: fix the code, never the fixture. See testdata/README.md.
+func TestLoadPublicKeyGoldenV2Descriptor(t *testing.T) {
+	info, key, err := LoadPublicKey(filepath.Join("testdata", "envisible.pub.v2.golden"))
+	if err != nil {
+		t.Fatalf("LoadPublicKey: %v", err)
+	}
+	if key != nil {
+		t.Errorf("golden v2 descriptor produced a legacy v1 key")
+	}
+	if info == nil {
+		t.Fatalf("golden v2 descriptor produced nil PublicKeyInfo")
+	}
+	if info.Kind != GCP {
+		t.Errorf("Kind = %q, want %q", info.Kind, GCP)
+	}
+	const wantResource = "projects/envisible-golden/locations/us/keyRings/golden/cryptoKeys/golden/cryptoKeyVersions/1"
+	if info.Resource != wantResource {
+		t.Errorf("Resource = %q, want %q", info.Resource, wantResource)
+	}
+	if info.Alg != RSAOAEPSHA256_2048 {
+		t.Errorf("Alg = %q, want %q", info.Alg, RSAOAEPSHA256_2048)
+	}
+	wantN, ok := new(big.Int).SetString(goldenDescriptorModulus, 16)
+	if !ok {
+		t.Fatalf("goldenDescriptorModulus is not valid hex")
+	}
+	if info.PubKey.N.Cmp(wantN) != 0 {
+		t.Errorf("modulus = %x, want %x", info.PubKey.N, wantN)
+	}
+	if info.PubKey.E != 65537 {
+		t.Errorf("exponent = %d, want 65537", info.PubKey.E)
 	}
 }
 
@@ -293,32 +455,69 @@ func TestIsUnwrapperRegistered(t *testing.T) {
 
 func TestReplaceUnwrapperAndBootstrap(t *testing.T) {
 	kind := ProviderKind("test-replace")
+	ctx := context.Background()
 
-	sentinel := func(context.Context, *PublicKeyInfo) (Unwrapper, error) {
-		return nil, errors.New("original")
-	}
-	RegisterUnwrapper(kind, sentinel)
+	// Funcs are not comparable, so each one is identified by the error it
+	// returns: calling a factory says which factory it is.
+	errOriginal := errors.New("original")
+	errReplacement := errors.New("replacement")
+
+	RegisterUnwrapper(kind, func(context.Context, *PublicKeyInfo) (Unwrapper, error) {
+		return nil, errOriginal
+	})
 	prev := ReplaceUnwrapper(kind, func(context.Context, *PublicKeyInfo) (Unwrapper, error) {
-		return nil, errors.New("replacement")
+		return nil, errReplacement
 	})
 	if prev == nil {
-		t.Error("ReplaceUnwrapper did not return the prior factory")
+		t.Fatal("ReplaceUnwrapper did not return the prior factory")
 	}
-	if restored := ReplaceUnwrapper(kind, prev); restored == nil {
-		t.Error("restoring the prior factory should also return the replacement")
+	if _, err := prev(ctx, nil); !errors.Is(err, errOriginal) {
+		t.Errorf("ReplaceUnwrapper returned a factory yielding %v, want the original", err)
+	}
+	if _, err := OpenUnwrapper(ctx, &PublicKeyInfo{Kind: kind}); !errors.Is(err, errReplacement) {
+		t.Errorf("after ReplaceUnwrapper, OpenUnwrapper dispatched to %v, want the replacement", err)
 	}
 
-	bSentinel := func(context.Context, string) (*PublicKeyInfo, error) {
-		return nil, errors.New("original")
+	// Restoring is the same call with the prior factory. withFakeKMSProvider in
+	// cmd depends on it putting the original back; if it did not, one test's
+	// fake would leak into every later test in the package.
+	restored := ReplaceUnwrapper(kind, prev)
+	if restored == nil {
+		t.Fatal("restoring the prior factory should return the replacement")
 	}
-	RegisterBootstrap(kind, bSentinel)
+	if _, err := restored(ctx, nil); !errors.Is(err, errReplacement) {
+		t.Errorf("restore returned a factory yielding %v, want the replacement", err)
+	}
+	if _, err := OpenUnwrapper(ctx, &PublicKeyInfo{Kind: kind}); !errors.Is(err, errOriginal) {
+		t.Errorf("after restore, OpenUnwrapper dispatched to %v, want the original", err)
+	}
+
+	RegisterBootstrap(kind, func(context.Context, string) (*PublicKeyInfo, error) {
+		return nil, errOriginal
+	})
 	bPrev := ReplaceBootstrap(kind, func(context.Context, string) (*PublicKeyInfo, error) {
-		return nil, errors.New("replacement")
+		return nil, errReplacement
 	})
 	if bPrev == nil {
-		t.Error("ReplaceBootstrap did not return the prior fetcher")
+		t.Fatal("ReplaceBootstrap did not return the prior fetcher")
 	}
-	ReplaceBootstrap(kind, bPrev)
+	if _, err := bPrev(ctx, "x"); !errors.Is(err, errOriginal) {
+		t.Errorf("ReplaceBootstrap returned a fetcher yielding %v, want the original", err)
+	}
+	if _, err := BootstrapPublicKey(ctx, kind, "x"); !errors.Is(err, errReplacement) {
+		t.Errorf("after ReplaceBootstrap, BootstrapPublicKey dispatched to %v, want the replacement", err)
+	}
+
+	bRestored := ReplaceBootstrap(kind, bPrev)
+	if bRestored == nil {
+		t.Fatal("restoring the prior fetcher should return the replacement")
+	}
+	if _, err := bRestored(ctx, "x"); !errors.Is(err, errReplacement) {
+		t.Errorf("restore returned a fetcher yielding %v, want the replacement", err)
+	}
+	if _, err := BootstrapPublicKey(ctx, kind, "x"); !errors.Is(err, errOriginal) {
+		t.Errorf("after restore, BootstrapPublicKey dispatched to %v, want the original", err)
+	}
 }
 
 func TestWritePublicKeyRejectsInvalidAlgorithm(t *testing.T) {
