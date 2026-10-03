@@ -39,7 +39,8 @@ func TestPayloadGoesToStdoutAndChatterToStderr(t *testing.T) {
 		{name: "decrypt", args: []string{"decrypt", ".env"}, want: "MY_VAR=ENC[" + secret + "]"},
 		{name: "decrypt --strip", args: []string{"decrypt", "--strip", ".env"}, want: "MY_VAR=" + secret},
 		{name: "encrypt -", stdin: "password: ENC[hello]\n", args: []string{"encrypt", "-"}, want: "password: ENC[v1:"},
-		{name: "keygen --print-key", args: []string{"keygen", "--print-key"}},
+		// --force: the fixture already holds a keypair, which keygen will not replace without it.
+		{name: "keygen --print-key", args: []string{"keygen", "--print-key", "--force"}},
 		{
 			name:    "set --dry-run",
 			stdin:   `{"BRAND_NEW":"b"}`,

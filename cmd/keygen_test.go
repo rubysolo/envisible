@@ -124,6 +124,10 @@ func TestKeygenWithoutPrintKeyIgnoresTTY(t *testing.T) {
 	}
 }
 
+// The failed-write tests below pass --force wherever a key file already exists:
+// without it keygen stops at the overwrite refusal and never reaches the write
+// they are about.
+
 // The tests below pin keygen's all-or-nothing write. The two key files are
 // useless apart, and the failure this guards against is worse than useless:
 // keygen used to write envisible.pub first, so a failed private-key write left
@@ -175,9 +179,12 @@ func TestKeygenFailedPrivateKeyWriteLeavesTheExistingPairIntact(t *testing.T) {
 	sealed := existingKeypair(t)
 	before := snapshotDir(t)
 
-	_, _, err := runRoot(t, "--key", filepath.Join("no-such-dir", "envisible.key"), "keygen")
+	_, _, err := runRoot(t, "--key", filepath.Join("no-such-dir", "envisible.key"), "keygen", "--force")
 	if err == nil {
 		t.Fatal("keygen succeeded with an unwritable private key path")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("keygen error = %v, want the failed write (not the overwrite refusal)", err)
 	}
 	assertDirUnchanged(t, before)
 	assertPairStillWorks(t, sealed)
@@ -187,9 +194,12 @@ func TestKeygenFailedPublicKeyWriteLeavesTheExistingPairIntact(t *testing.T) {
 	sealed := existingKeypair(t)
 	before := snapshotDir(t)
 
-	_, _, err := runRoot(t, "--pub", filepath.Join("no-such-dir", "envisible.pub"), "keygen")
+	_, _, err := runRoot(t, "--pub", filepath.Join("no-such-dir", "envisible.pub"), "keygen", "--force")
 	if err == nil {
 		t.Fatal("keygen succeeded with an unwritable public key path")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("keygen error = %v, want the failed write (not the overwrite refusal)", err)
 	}
 	assertDirUnchanged(t, before)
 	assertPairStillWorks(t, sealed)
@@ -200,8 +210,8 @@ func TestKeygenFailedWriteCreatesNeitherFile(t *testing.T) {
 	for name, args := range map[string][]string{
 		"private key path unwritable": {"--key", filepath.Join("no-such-dir", "envisible.key"), "keygen"},
 		"public key path unwritable":  {"--pub", filepath.Join("no-such-dir", "envisible.pub"), "keygen"},
-		"private key path is a dir":   {"--key", "a-directory", "keygen"},
-		"public key path is a dir":    {"--pub", "a-directory", "keygen"},
+		"private key path is a dir":   {"--key", "a-directory", "keygen", "--force"},
+		"public key path is a dir":    {"--pub", "a-directory", "keygen", "--force"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Chdir(t.TempDir())
@@ -233,7 +243,9 @@ func TestKeygenPrintKeyFailedStdoutWritesNoPublicKey(t *testing.T) {
 
 			resetRoot(failingWriter{errors.New("stdout: broken pipe")})
 			t.Cleanup(func() { resetRoot(nil) })
-			rootCmd.SetArgs([]string{"keygen", "--print-key"})
+			// --force so the existing-pair case reaches the write rather than
+			// stopping at the overwrite refusal.
+			rootCmd.SetArgs([]string{"keygen", "--print-key", "--force"})
 			var err error
 			captureStdStreams(t, func() { err = rootCmd.Execute() })
 			if err == nil {
@@ -268,7 +280,7 @@ func TestKeygenRollsBackThePublicKeyWhenThePrivateKeyRenameFails(t *testing.T) {
 		before := snapshotDir(t)
 		failPrivateRename(t)
 
-		_, _, err := runRoot(t, "keygen")
+		_, _, err := runRoot(t, "keygen", "--force")
 		if err == nil || !strings.Contains(err.Error(), "rename refused") {
 			t.Fatalf("keygen error = %v, want the rename failure", err)
 		}
@@ -300,7 +312,7 @@ func TestKeygenReplacesALoosePrivateKeyWithAnOwnerOnlyOne(t *testing.T) {
 	}
 	oldPub, _ := os.ReadFile("envisible.pub")
 
-	if _, err := runKeygen(t); err != nil {
+	if _, err := runKeygen(t, "--force"); err != nil {
 		t.Fatalf("keygen: %v", err)
 	}
 	info, err := os.Stat("envisible.key")
@@ -319,5 +331,148 @@ func TestKeygenReplacesALoosePrivateKeyWithAnOwnerOnlyOne(t *testing.T) {
 	mustRun(t, "encrypt", "-i", "probe.env")
 	if out, _, err := runRoot(t, "decrypt", "--strip", "probe.env"); err != nil || !strings.Contains(out, "NEW=fresh-secret") {
 		t.Errorf("the new pair does not round-trip: out=%q err=%v", out, err)
+	}
+}
+
+// keygen refuses to replace a key file unless told to. The old private key is
+// the only thing that can decrypt what was encrypted with it, and this is the
+// command that would destroy it.
+func TestKeygenRefusesToOverwriteExistingKeys(t *testing.T) {
+	cases := map[string]struct {
+		setup func(t *testing.T)
+		args  []string
+		names []string // every path the error must name
+	}{
+		"both key files exist": {
+			setup: func(t *testing.T) {},
+			args:  []string{"keygen"},
+			names: []string{"envisible.pub", "envisible.key"},
+		},
+		"only the private key exists": {
+			setup: func(t *testing.T) { os.Remove("envisible.pub") },
+			args:  []string{"keygen"},
+			names: []string{"envisible.key"},
+		},
+		// A machine that only encrypts, or a KMS project: there is no private
+		// key file, and the public key is still not keygen's to replace.
+		"only the public key exists": {
+			setup: func(t *testing.T) { os.Remove("envisible.key") },
+			args:  []string{"keygen"},
+			names: []string{"envisible.pub"},
+		},
+		"--print-key with an existing public key": {
+			setup: func(t *testing.T) { os.Remove("envisible.key") },
+			args:  []string{"keygen", "--print-key"},
+			names: []string{"envisible.pub"},
+		},
+		"custom paths": {
+			setup: func(t *testing.T) {
+				os.Rename("envisible.pub", "team.pub")
+				os.Rename("envisible.key", "team.key")
+			},
+			args:  []string{"--pub", "team.pub", "--key", "team.key", "keygen"},
+			names: []string{"team.pub", "team.key"},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			sealed := existingKeypair(t)
+			withKeygenStdoutTTY(t, false)
+			tc.setup(t)
+			before := snapshotDir(t)
+
+			stdout, _, err := runRoot(t, tc.args...)
+			if err == nil {
+				t.Fatal("keygen replaced an existing key without --force")
+			}
+			if !strings.Contains(err.Error(), "--force") {
+				t.Errorf("error = %q, want it to say how to proceed (--force)", err)
+			}
+			for _, n := range tc.names {
+				if !strings.Contains(err.Error(), n) {
+					t.Errorf("error = %q, want it to name %s", err, n)
+				}
+			}
+			if strings.TrimSpace(stdout) != "" {
+				t.Errorf("a refused keygen wrote to stdout: %q", stdout)
+			}
+			assertDirUnchanged(t, before)
+			if name == "both key files exist" {
+				assertPairStillWorks(t, sealed)
+			}
+		})
+	}
+}
+
+// A dangling symlink at the key path is still something in the way: the check
+// uses Lstat, so keygen refuses rather than writing through or over the link.
+func TestKeygenRefusesADanglingSymlinkAtTheKeyPath(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.Symlink("nowhere", "envisible.key"); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, _, err := runRoot(t, "keygen")
+	if err == nil || !strings.Contains(err.Error(), "envisible.key already exists") {
+		t.Fatalf("keygen error = %v, want a refusal naming envisible.key", err)
+	}
+	if target, lerr := os.Readlink("envisible.key"); lerr != nil || target != "nowhere" {
+		t.Errorf("the symlink was replaced: target=%q err=%v", target, lerr)
+	}
+	if _, serr := os.Stat("envisible.pub"); !errors.Is(serr, os.ErrNotExist) {
+		t.Errorf("a refused keygen created envisible.pub (stat err = %v)", serr)
+	}
+}
+
+// With --print-key no private key file is written, so one that happens to
+// exist is not in the way: only the public key path is checked.
+func TestKeygenPrintKeyIgnoresAnExistingPrivateKeyFile(t *testing.T) {
+	existingKeypair(t)
+	withKeygenStdoutTTY(t, false)
+	oldKey, _ := os.ReadFile("envisible.key")
+	if err := os.Remove("envisible.pub"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runKeygen(t, "--print-key")
+	if err != nil {
+		t.Fatalf("keygen --print-key: %v", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		t.Error("no private key on stdout")
+	}
+	if now, _ := os.ReadFile("envisible.key"); string(now) != string(oldKey) {
+		t.Error("--print-key modified the existing envisible.key")
+	}
+}
+
+// --force replaces both files with a new, working pair.
+func TestKeygenForceReplacesTheKeypair(t *testing.T) {
+	existingKeypair(t)
+	oldPub, _ := os.ReadFile("envisible.pub")
+	oldKey, _ := os.ReadFile("envisible.key")
+
+	if _, err := runKeygen(t, "--force"); err != nil {
+		t.Fatalf("keygen --force: %v", err)
+	}
+	newPub, _ := os.ReadFile("envisible.pub")
+	newKey, _ := os.ReadFile("envisible.key")
+	if string(newPub) == string(oldPub) || string(newKey) == string(oldKey) {
+		t.Fatal("keygen --force did not replace both key files")
+	}
+	if err := os.WriteFile("probe.env", []byte("NEW=ENC[fresh-secret]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, "encrypt", "-i", "probe.env")
+	if out, _, err := runRoot(t, "decrypt", "--strip", "probe.env"); err != nil || !strings.Contains(out, "NEW=fresh-secret") {
+		t.Errorf("the new pair does not round-trip: out=%q err=%v", out, err)
+	}
+}
+
+// A first keygen, with nothing on disk, needs no flag.
+func TestKeygenNeedsNoForceInAnEmptyDirectory(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if _, err := runKeygen(t); err != nil {
+		t.Fatalf("keygen in an empty directory: %v", err)
 	}
 }
