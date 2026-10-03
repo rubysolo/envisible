@@ -58,8 +58,7 @@ func StructureCheck(inner string, v2WrappedSize int) error {
 		if err != nil {
 			return fmt.Errorf("v2: base64 decode: %w", err)
 		}
-		// wrapped DK + nonce (24) + secretbox.Overhead (16)
-		min := v2WrappedSize + 24 + secretbox.Overhead
+		min := v2MinBlobLen(v2WrappedSize)
 		if len(data) < min {
 			return fmt.Errorf("v2: ciphertext truncated (%d bytes, need at least %d)", len(data), min)
 		}
@@ -103,6 +102,21 @@ func (d NaclDecryptor) DecryptMarker(_ context.Context, inner string) ([]byte, e
 		return nil, ErrSkip
 	}
 	return crypto.Decrypt(inner[3:], d.PrivateKey)
+}
+
+// v2NonceLen is the secretbox nonce length in a v2 blob.
+const v2NonceLen = 24
+
+// v2MinBlobLen is the length of the smallest valid v2 blob for a wrapped data
+// key of wrappedSize bytes:
+//
+//	wrapped_DK[wrappedSize] || nonce[24] || secretbox_ct
+//
+// where secretbox_ct is at least secretbox.Overhead (16) bytes, the ciphertext
+// of an empty plaintext. Decrypt, the structure check and rewrap all reject
+// anything shorter; they share this so the three cannot drift apart.
+func v2MinBlobLen(wrappedSize int) int {
+	return wrappedSize + v2NonceLen + secretbox.Overhead
 }
 
 // EnvelopeEncryptor emits v2: markers via per-value envelope:
@@ -168,9 +182,8 @@ func (d *EnvelopeDecryptor) DecryptMarker(ctx context.Context, inner string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("envelope: base64 decode: %w", err)
 	}
-	// wrapped_DK[wrappedSize] || nonce[24] || secretbox_ct (≥ secretbox.Overhead = 16 bytes for an empty plaintext)
-	const nonceLen = 24
-	minLen := d.wrappedSize + nonceLen + secretbox.Overhead
+	const nonceLen = v2NonceLen
+	minLen := v2MinBlobLen(d.wrappedSize)
 	if len(blob) < minLen {
 		return nil, fmt.Errorf("envelope: ciphertext too short (%d < %d)", len(blob), minLen)
 	}

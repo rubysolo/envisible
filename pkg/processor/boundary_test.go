@@ -181,8 +181,8 @@ func TestRewrapV2InnerBarePrefixIsAnErrorNotASkip(t *testing.T) {
 	if errors.Is(err, ErrSkip) {
 		t.Fatalf("bare v2: prefix was skipped, want a too-short error")
 	}
-	if err == nil || err.Error() != "rewrap: ciphertext too short for wrapped key size 4" {
-		t.Fatalf("error = %v, want %q", err, "rewrap: ciphertext too short for wrapped key size 4")
+	if want := "rewrap: ciphertext too short (0 < 44)"; err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
 	}
 	if got != "" {
 		t.Errorf("inner = %q, want empty on error", got)
@@ -196,15 +196,27 @@ func TestRewrapV2InnerBarePrefixIsAnErrorNotASkip(t *testing.T) {
 	}
 }
 
-// rewrap.go:72 — a blob that is exactly the wrapped key and nothing else has
-// no payload to carry over. It must be refused before the KMS is called.
-func TestRewrapV2InnerRejectsBlobWithNoPayload(t *testing.T) {
-	for _, n := range []int{0, 1, boundaryWrapSize - 1, boundaryWrapSize} {
-		u := &boundaryUnwrapper{dk: make([]byte, 32)}
+// rewrap.go:72 — rewrap enforces the same minimum as decrypt: wrapped key +
+// 24-byte nonce + 16-byte secretbox overhead. It used to require only "longer
+// than the wrapped key", so a blob truncated anywhere inside the nonce or the
+// payload was re-wrapped and counted as rotated although nothing could ever
+// decrypt it. Every too-short length is refused before the KMS is called; the
+// minimum itself (an encrypted empty string) is accepted.
+func TestRewrapV2InnerRejectsBlobShorterThanDecryptAccepts(t *testing.T) {
+	var dk [32]byte
+	full := boundaryV2Blob([]byte("OLDW"), &dk, nil)
+	minLen := boundaryWrapSize + 24 + secretbox.Overhead
+	if len(full) != minLen {
+		t.Fatalf("fixture: an encrypted empty string is %d bytes, want the minimum %d", len(full), minLen)
+	}
+
+	for _, n := range []int{0, 1, boundaryWrapSize - 1, boundaryWrapSize, boundaryWrapSize + 1, boundaryWrapSize + 24, minLen - 1} {
+		u := &boundaryUnwrapper{dk: dk[:]}
 		w := &boundaryWrapper{wrapped: []byte("NEWW")}
-		got, err := rewrapV2Inner(context.Background(), boundaryInner([]byte("OLDW")[:n]), u, boundaryWrapSize, w)
-		if err == nil || err.Error() != "rewrap: ciphertext too short for wrapped key size 4" {
-			t.Errorf("len %d: inner = %q, error = %v, want %q", n, got, err, "rewrap: ciphertext too short for wrapped key size 4")
+		got, err := rewrapV2Inner(context.Background(), boundaryInner(full[:n]), u, boundaryWrapSize, w)
+		want := fmt.Sprintf("rewrap: ciphertext too short (%d < %d)", n, minLen)
+		if err == nil || err.Error() != want {
+			t.Errorf("len %d: inner = %q, error = %v, want %q", n, got, err, want)
 		}
 		if u.calls != 0 {
 			t.Errorf("len %d: unwrapper called %d times, want 0", n, u.calls)
@@ -212,6 +224,41 @@ func TestRewrapV2InnerRejectsBlobWithNoPayload(t *testing.T) {
 		if w.dk != nil {
 			t.Errorf("len %d: wrapper was called for a rejected blob", n)
 		}
+
+		// rewrap and decrypt agree on what is too short.
+		dec := NewEnvelopeDecryptor(&boundaryUnwrapper{dk: dk[:]}, boundaryWrapSize)
+		if _, derr := dec.DecryptMarker(context.Background(), boundaryInner(full[:n])); derr == nil {
+			t.Errorf("len %d: decrypt accepted a blob rewrap rejects", n)
+		}
+	}
+
+	u := &boundaryUnwrapper{dk: dk[:]}
+	if _, err := rewrapV2Inner(context.Background(), boundaryInner(full), u, boundaryWrapSize, &boundaryWrapper{wrapped: []byte("NEWW")}); err != nil {
+		t.Errorf("a blob of exactly the minimum length was rejected: %v", err)
+	}
+}
+
+// The same defect end to end: a file with one good marker and one truncated
+// marker must abort the whole rotation, as RewrapContent documents, instead of
+// reporting both as rotated.
+func TestRewrapContentAbortsOnATruncatedMarker(t *testing.T) {
+	var dk [32]byte
+	good := boundaryV2Blob([]byte("OLDW"), &dk, []byte("hunter2"))
+	content := []byte("A=ENC[" + boundaryInner(good) + "]\nB=ENC[" + boundaryInner(good[:len(good)-10]) + "]\n")
+	if len(good)-10 <= boundaryWrapSize || len(good)-10 >= len(good) {
+		t.Fatal("fixture: the truncated blob must keep its wrapped key and lose payload")
+	}
+	// Truncating 10 bytes from a 7-byte secret's blob leaves it under the minimum.
+	if len(good)-10 >= boundaryWrapSize+24+secretbox.Overhead {
+		t.Fatal("fixture: the truncated blob is not under the minimum")
+	}
+
+	out, rotated, err := RewrapContent(context.Background(), content, &boundaryUnwrapper{dk: dk[:]}, boundaryWrapSize, &boundaryWrapper{wrapped: []byte("NEWW")})
+	if err == nil || !strings.Contains(err.Error(), "ciphertext too short") {
+		t.Fatalf("RewrapContent: rotated=%d err=%v, want a too-short error", rotated, err)
+	}
+	if out != nil {
+		t.Errorf("RewrapContent returned content alongside the error: %q", out)
 	}
 }
 
