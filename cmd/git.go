@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/rubysolo/envisible/pkg/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -32,7 +33,7 @@ This command executes:
 		}
 
 		// Configure textconv
-		fmt.Fprintln(cmd.OutOrStdout(), "Configuring git diff driver...")
+		ui.Info("Configuring git diff driver...")
 
 		if err := runGit("config", "diff.envisible.textconv", "envisible decrypt --textconv"); err != nil {
 			return fmt.Errorf("failed to set diff.envisible.textconv: %w", err)
