@@ -14,6 +14,8 @@ decrypts with every later one.
 
 ## [Unreleased]
 
+## [0.0.8] - 2026-10-03
+
 ### Added
 
 - **`envisible set`** writes a secret into a file from stdin, so the plaintext never exists
@@ -195,7 +197,8 @@ First release.
   environment variables, to locate the key files.
 - Release binaries for Linux, macOS and Windows on amd64 and arm64, and a Homebrew formula.
 
-[Unreleased]: https://github.com/rubysolo/envisible/compare/v0.0.7...HEAD
+[Unreleased]: https://github.com/rubysolo/envisible/compare/v0.0.8...HEAD
+[0.0.8]: https://github.com/rubysolo/envisible/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/rubysolo/envisible/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/rubysolo/envisible/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/rubysolo/envisible/compare/v0.0.4...v0.0.5

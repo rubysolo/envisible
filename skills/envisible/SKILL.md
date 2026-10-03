@@ -288,7 +288,7 @@ Scope `ENVISIBLE_KEY` to the steps that decrypt, not the whole job. Don't `echo`
 
 `ENVISIBLE_KEY` holds the key itself. `ENVISIBLE_KEY_PATH` holds a *path* to a key file. Don't mix them up. An explicitly passed `--key` overrides both.
 
-**Older binaries:** `ENVISIBLE_KEY` is newer than v0.0.7. Check whether the installed binary supports it with `envisible keygen --help | grep -q -- --print-key` (both arrived in the same change). If it doesn't, write the key to a file instead:
+**Older binaries:** `ENVISIBLE_KEY` needs v0.0.8 or later. Check whether the installed binary supports it with `envisible keygen --help | grep -q -- --print-key` (both arrived in the same change). If it doesn't, write the key to a file instead:
 ```yaml
 - name: Restore envisible key
   run: |
