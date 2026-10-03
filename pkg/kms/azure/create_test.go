@@ -62,10 +62,10 @@ func TestCreateKeyHappyPath(t *testing.T) {
 }
 
 func TestCreateKeyRejectsMissingFlags(t *testing.T) {
-	if _, err := CreateKey(context.Background(), CreateKeyParams{Vault: "v"}); err == nil || !strings.Contains(err.Error(), "required") {
+	if _, err := CreateKey(context.Background(), CreateKeyParams{Vault: "v"}); err == nil || !strings.Contains(err.Error(), "--vault and --name are required") {
 		t.Errorf("expected required-fields error, got %v", err)
 	}
-	if _, err := CreateKey(context.Background(), CreateKeyParams{Name: "k"}); err == nil || !strings.Contains(err.Error(), "required") {
+	if _, err := CreateKey(context.Background(), CreateKeyParams{Name: "k"}); err == nil || !strings.Contains(err.Error(), "--vault and --name are required") {
 		t.Errorf("expected required-fields error, got %v", err)
 	}
 }
