@@ -57,6 +57,13 @@ Thumbs.db
 *.cert
 secrets.*
 
+# Wire-format exemplars (docs/plans/07): fixed, test-only key material and
+# ciphertext that must stay in the repo. Named one by one so the rules above
+# still cover everything else, including other files in that directory.
+!/pkg/processor/testdata/exemplar_v1.key
+!/pkg/processor/testdata/exemplar_v2_rsa.pem
+!/pkg/processor/testdata/exemplars.env
+
 # Misc
 # Ignore compiled Go packages (cache is not usually in repo, but keep this for safety)
 *.test
